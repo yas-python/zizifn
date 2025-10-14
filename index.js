@@ -1,44 +1,952 @@
 import { connect } from 'cloudflare:sockets';
 
+// Helper functions (updated for robustness)
 /**
- * - UUID: To generate your own UUID, visit: https://www.uuidgenerator.net
- *   You can add multiple UUIDs by separating them with a comma (e.g., 'uuid1, uuid2').
- * 
- * - Proxy IP Land: A large, daily-updated repository of tested proxy IPs.
- *   Find the list here: https://github.com/NiREvil/vless/blob/main/sub/ProxyIP.md
- * 
- * - Scamalytics API: The default key is for public use. If you are creating a popular fork,
- *   it's recommended to get your own free API key from:
- *   https://scamalytics.com/ip/api/enquiry?monthly_api_calls=5000
+ * Generates a standard RFC4122 version 4 UUID.
+ * @returns {string} A new UUID.
  */
-const Config = {
-  // Can be a single UUID or multiple UUIDs separated by commas.
-  userID: 'd342d11e-d424-4583-b36e-524ab1f0afa4',
+function generateUUID() {
+  return crypto.randomUUID();
+}
 
-  // An array of proxy addresses. You can add multiple proxies to the list.
-  // Example: ['proxy1.ir:8443', '1.1.1.1:443', 'proxy2.com:2053']
+/**
+ * Checks if the expiration date and time are in the future.
+ * Treats the stored time as UTC to prevent timezone ambiguity.
+ * @param {string} expDate - The expiration date in 'YYYY-MM-DD' format.
+ * @param {string} expTime - The expiration time in 'HH:MM:SS' format.
+ * @returns {boolean} - True if the expiration is in the future, otherwise false.
+ */
+async function checkExpiration(expDate, expTime) {
+  if (!expDate || !expTime) return false;
+  const expDatetimeUTC = new Date(`${expDate}T${expTime}Z`);
+  return expDatetimeUTC > new Date() && !isNaN(expDatetimeUTC);
+}
+
+/**
+ * Retrieves user data from KV cache or falls back to D1 database.
+ * @param {object} env - The worker environment object.
+ * @param {string} uuid - The user's UUID.
+ * @returns {Promise<object|null>} - The user data or null if not found.
+ */
+async function getUserData(env, uuid) {
+  let userData = await env.USER_KV.get(`user:${uuid}`);
+  if (userData) {
+    try {
+      return JSON.parse(userData);
+    } catch (e) {
+      console.error(`Failed to parse user data from KV for UUID: ${uuid}`, e);
+    }
+  }
+
+  const query = await env.DB.prepare("SELECT expiration_date, expiration_time, data_limit, used_traffic, notes FROM users WHERE uuid = ?")
+    .bind(uuid)
+    .first();
+
+  if (!query) {
+    return null;
+  }
+
+  userData = { exp_date: query.expiration_date, exp_time: query.expiration_time, data_limit: query.data_limit, used_traffic: query.used_traffic, notes: query.notes };
+  await env.USER_KV.put(`user:${uuid}`, JSON.stringify(userData), { expirationTtl: 3600 });
+  return userData;
+}
+
+/**
+ * Updates the used traffic for a user in D1 and KV.
+ * @param {object} env - The worker environment object.
+ * @param {string} uuid - The user's UUID.
+ * @param {number} additionalTraffic - The additional traffic in bytes to add.
+ */
+async function updateUsedTraffic(env, uuid, additionalTraffic) {
+  if (additionalTraffic <= 0) return;
+
+  const stmt = await env.DB.prepare("UPDATE users SET used_traffic = used_traffic + ? WHERE uuid = ?")
+    .bind(additionalTraffic, uuid)
+    .run();
+
+  // Update KV cache
+  const userData = await getUserData(env, uuid); // Refresh from DB
+  if (userData) {
+    await env.USER_KV.put(`user:${uuid}`, JSON.stringify(userData), { expirationTtl: 3600 });
+  }
+}
+
+/**
+ * Fetches dashboard stats from D1.
+ * @param {object} env - The worker environment object.
+ * @returns {Promise<object>} - Stats object.
+ */
+async function fetchDashboardStats(env) {
+  const now = new Date().toISOString().split('T')[0]; // Current UTC date
+  const nowTime = new Date().toISOString().split('T')[1].slice(0, 8); // Current UTC time
+
+  const totalUsers = await env.DB.prepare("SELECT COUNT(*) as count FROM users").first();
+  const expiredUsers = await env.DB.prepare("SELECT COUNT(*) as count FROM users WHERE (expiration_date < ? OR (expiration_date = ? AND expiration_time < ?)) OR (data_limit > 0 AND used_traffic >= data_limit)").bind(now, now, nowTime).first();
+  const totalTraffic = await env.DB.prepare("SELECT SUM(used_traffic) as total FROM users").first();
+
+  return {
+    totalUsers: totalUsers.count,
+    activeUsers: totalUsers.count - expiredUsers.count,
+    expiredUsers: expiredUsers.count,
+    totalTraffic: totalTraffic.total || 0
+  };
+}
+
+// --- Admin Security & Panel ---
+
+// HTML for the Admin Login Page (unchanged)
+const adminLoginHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Login</title>
+    <style>
+        body { display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #121212; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+        .login-container { background-color: #1e1e1e; padding: 40px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5); text-align: center; width: 320px; border: 1px solid #333; }
+        h1 { color: #ffffff; margin-bottom: 24px; font-weight: 500; }
+        form { display: flex; flex-direction: column; }
+        input[type="password"] { background-color: #2c2c2c; border: 1px solid #444; color: #ffffff; padding: 12px; border-radius: 8px; margin-bottom: 20px; font-size: 16px; }
+        input[type="password"]:focus { outline: none; border-color: #007aff; box-shadow: 0 0 0 2px rgba(0, 122, 255, 0.3); }
+        button { background-color: #007aff; color: white; border: none; padding: 12px; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; transition: background-color 0.2s; }
+        button:hover { background-color: #005ecb; }
+        .error { color: #ff3b30; margin-top: 15px; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <h1>Admin Login</h1>
+        <form method="POST" action="/admin">
+            <input type="password" name="password" placeholder="••••••••••••••" required>
+            <button type="submit">Login</button>
+        </form>
+        </div>
+</body>
+</html>`;
+
+// --- IMPROVED ADMIN PANEL HTML with Dashboard Stats, Bulk Delete, and Search ---
+const adminPanelHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Dashboard</title>
+    <style>
+        :root {
+            --bg-main: #111827; --bg-card: #1F2937; --border: #374151; --text-primary: #F9FAFB;
+            --text-secondary: #9CA3AF; --accent: #3B82F6; --accent-hover: #2563EB; --danger: #EF4444;
+            --danger-hover: #DC2626; --success: #22C55E; --expired: #F59E0B; --btn-secondary-bg: #4B5563;
+        }
+        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: var(--bg-main); color: var(--text-primary); font-size: 14px; }
+        .container { max-width: 1200px; margin: 40px auto; padding: 0 20px; }
+        h1, h2 { font-weight: 600; }
+        h1 { font-size: 24px; margin-bottom: 20px; }
+        h2 { font-size: 18px; border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-bottom: 20px; }
+        .card { background-color: var(--bg-card); border-radius: 8px; padding: 24px; border: 1px solid var(--border); box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; align-items: flex-end; }
+        .form-group { display: flex; flex-direction: column; }
+        .form-group label { margin-bottom: 8px; font-weight: 500; color: var(--text-secondary); }
+        .form-group .input-group { display: flex; }
+        input[type="text"], input[type="date"], input[type="time"], input[type="number"], select {
+            width: 100%; box-sizing: border-box; background-color: #374151; border: 1px solid #4B5563; color: var(--text-primary);
+            padding: 10px; border-radius: 6px; font-size: 14px; transition: border-color 0.2s;
+        }
+        input:focus { outline: none; border-color: var(--accent); }
+        .label-note { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
+        .btn {
+            padding: 10px 16px; border: none; border-radius: 6px; font-weight: 600; cursor: pointer;
+            transition: background-color 0.2s, transform 0.1s; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+        }
+        .btn:active { transform: scale(0.98); }
+        .btn-primary { background-color: var(--accent); color: white; }
+        .btn-primary:hover { background-color: var(--accent-hover); }
+        .btn-secondary { background-color: var(--btn-secondary-bg); color: white; }
+        .btn-secondary:hover { background-color: #6B7280; }
+        .btn-danger { background-color: var(--danger); color: white; }
+        .btn-danger:hover { background-color: var(--danger-hover); }
+        .input-group .btn-secondary { border-top-left-radius: 0; border-bottom-left-radius: 0; }
+        .input-group input { border-top-right-radius: 0; border-bottom-right-radius: 0; border-right: none; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        th { color: var(--text-secondary); font-weight: 600; font-size: 12px; text-transform: uppercase; }
+        td { color: var(--text-primary); font-family: "SF Mono", "Fira Code", monospace; }
+        .status-badge { padding: 4px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; display: inline-block; }
+        .status-active { background-color: var(--success); color: #064E3B; }
+        .status-expired { background-color: var(--expired); color: #78350F; }
+        .actions-cell .btn { padding: 6px 10px; font-size: 12px; }
+        #toast { position: fixed; top: 20px; right: 20px; background-color: var(--bg-card); color: white; padding: 15px 20px; border-radius: 8px; z-index: 1001; display: none; border: 1px solid var(--border); box-shadow: 0 4px 12px rgba(0,0,0,0.3); opacity: 0; transition: opacity 0.3s, transform 0.3s; transform: translateY(-20px); }
+        #toast.show { display: block; opacity: 1; transform: translateY(0); }
+        #toast.error { border-left: 5px solid var(--danger); }
+        #toast.success { border-left: 5px solid var(--success); }
+        .uuid-cell { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        .btn-copy { background: transparent; border: none; color: var(--text-secondary); padding: 4px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+        .btn-copy:hover { background-color: #374151; color: var(--text-primary); }
+        .btn svg, .actions-cell .btn svg { width: 14px; height: 14px; }
+        .actions-cell { display: flex; gap: 8px; justify-content: center; }
+        .time-display { display: flex; flex-direction: column; }
+        .time-local { font-weight: 600; }
+        .time-utc, .time-relative { font-size: 11px; color: var(--text-secondary); }
+        .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.7); z-index: 1000; display: flex; justify-content: center; align-items: center; opacity: 0; visibility: hidden; transition: opacity 0.3s, visibility 0.3s; }
+        .modal-overlay.show { opacity: 1; visibility: visible; }
+        .modal-content { background-color: var(--bg-card); padding: 30px; border-radius: 12px; box-shadow: 0 5px 25px rgba(0,0,0,0.4); width: 90%; max-width: 500px; transform: scale(0.9); transition: transform 0.3s; border: 1px solid var(--border); }
+        .modal-overlay.show .modal-content { transform: scale(1); }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 15px; margin-bottom: 20px; }
+        .modal-header h2 { margin: 0; border: none; font-size: 20px; }
+        .modal-close-btn { background: none; border: none; color: var(--text-secondary); font-size: 24px; cursor: pointer; line-height: 1; }
+        .modal-footer { display: flex; justify-content: flex-end; gap: 12px; margin-top: 25px; }
+        .time-quick-set-group { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; data-target-date="expiryDate" data-target-time="expiryTime"; }
+        .btn-outline-secondary {
+            background-color: transparent; border: 1px solid var(--btn-secondary-bg); color: var(--text-secondary);
+            padding: 6px 10px; font-size: 12px; font-weight: 500;
+        }
+        .btn-outline-secondary:hover { background-color: var(--btn-secondary-bg); color: white; border-color: var(--btn-secondary-bg); }
+        .progress-bar-container { width: 100%; background-color: #4B5563; border-radius: 4px; height: 8px; overflow: hidden; margin-top: 4px; }
+        .progress-bar { height: 100%; background-color: #22C55E; transition: width 0.3s ease; }
+        .progress-bar.warning { background-color: #F59E0B; }
+        .progress-bar.danger { background-color: #EF4444; }
+        .traffic-text { font-size: 12px; color: var(--text-secondary); margin-top: 4px; text-align: right; }
+        .dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 30px; }
+        .dashboard-stat { background-color: var(--bg-card); padding: 16px; border-radius: 8px; border: 1px solid var(--border); text-align: center; }
+        .dashboard-stat h3 { font-size: 28px; color: var(--accent); margin: 0; }
+        .dashboard-stat p { color: var(--text-secondary); margin: 0; font-size: 14px; }
+        .search-container { margin-bottom: 16px; }
+        .search-input { width: 100%; padding: 10px; border-radius: 6px; background-color: #374151; border: 1px solid #4B5563; color: var(--text-primary); }
+        .search-input:focus { border-color: var(--accent); }
+        .table-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+        .delete-selected-btn { background-color: var(--danger); color: white; }
+        .delete-selected-btn:hover { background-color: var(--danger-hover); }
+        @media (max-width: 768px) {
+            tr { border: 1px solid var(--border); border-radius: 8px; display: block; margin-bottom: 1rem; }
+            td { border: none; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+            .dashboard-grid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+            .dashboard-stat h3 { font-size: 24px; }
+            .dashboard-stat p { font-size: 12px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Admin Dashboard</h1>
+        <div class="dashboard-grid" id="dashboardStats">
+            <!-- Stats will be loaded here -->
+        </div>
+        <div class="card">
+            <h2>Create User</h2>
+            <form id="createUserForm" class="form-grid">
+                <div class="form-group" style="grid-column: 1 / -1;"><label for="uuid">UUID</label><div class="input-group"><input type="text" id="uuid" required><button type="button" id="generateUUID" class="btn btn-secondary">Generate</button></div></div>
+                <div class="form-group"><label for="expiryDate">Expiry Date</label><input type="date" id="expiryDate" required></div>
+                <div class="form-group">
+                    <label for="expiryTime">Expiry Time (Your Local Time)</label>
+                    <input type="time" id="expiryTime" step="1" required>
+                    <div class="label-note">Automatically converted to UTC on save.</div>
+                    <div class="time-quick-set-group" data-target-date="expiryDate" data-target-time="expiryTime">
+                        <button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="hour">+1 Hour</button>
+                        <button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="day">+1 Day</button>
+                        <button type="button" class="btn btn-outline-secondary" data-amount="7" data-unit="day">+1 Week</button>
+                        <button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="month">+1 Month</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="dataLimit">Data Limit</label>
+                    <div class="input-group">
+                        <input type="number" id="dataLimitValue" min="0" value="0" required>
+                        <select id="dataLimitUnit">
+                            <option value="KB">KB</option>
+                            <option value="MB">MB</option>
+                            <option value="GB" selected>GB</option>
+                            <option value="TB">TB</option>
+                        </select>
+                        <button type="button" class="btn btn-secondary" onclick="setUnlimited()">Unlimited</button>
+                    </div>
+                    <div class="label-note">0 or Unlimited for no limit.</div>
+                </div>
+                <div class="form-group"><label for="notes">Notes</label><input type="text" id="notes" placeholder="(Optional)"></div>
+                <div class="form-group"><label>&nbsp;</label><button type="submit" class="btn btn-primary">Create User</button></div>
+            </form>
+        </div>
+        <div class="card" style="margin-top: 30px;">
+            <h2>User List</h2>
+            <div class="search-container">
+                <input type="text" id="searchInput" class="search-input" placeholder="Search by UUID or Notes...">
+            </div>
+            <div class="table-header">
+                <button id="deleteSelected" class="btn btn-danger delete-selected-btn">Delete Selected</button>
+            </div>
+            <div style="overflow-x: auto;">
+                 <table>
+                    <thead><tr><th><input type="checkbox" id="selectAll"></th><th>UUID</th><th>Created</th><th>Expiry (Admin Local)</th><th>Expiry (Tehran)</th><th>Status</th><th>Traffic</th><th>Notes</th><th>Actions</th></tr></thead>
+                    <tbody id="userList"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <div id="toast"></div>
+    <div id="editModal" class="modal-overlay">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Edit User</h2>
+                <button id="modalCloseBtn" class="modal-close-btn">&times;</button>
+            </div>
+            <form id="editUserForm">
+                <input type="hidden" id="editUuid" name="uuid">
+                <div class="form-group"><label for="editExpiryDate">Expiry Date</label><input type="date" id="editExpiryDate" name="exp_date" required></div>
+                <div class="form-group" style="margin-top: 16px;">
+                    <label for="editExpiryTime">Expiry Time (Your Local Time)</label>
+                    <input type="time" id="editExpiryTime" name="exp_time" step="1" required>
+                     <div class="label-note">Your current timezone is used for conversion.</div>
+                    <div class="time-quick-set-group" data-target-date="editExpiryDate" data-target-time="editExpiryTime">
+                        <button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="hour">+1 Hour</button>
+                        <button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="day">+1 Day</button>
+                        <button type="button" class="btn btn-outline-secondary" data-amount="7" data-unit="day">+1 Week</button>
+                        <button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="month">+1 Month</button>
+                    </div>
+                </div>
+                <div class="form-group" style="margin-top: 16px;">
+                    <label for="editDataLimit">Data Limit</label>
+                    <div class="input-group">
+                        <input type="number" id="editDataLimitValue" min="0" required>
+                        <select id="editDataLimitUnit">
+                            <option value="KB">KB</option>
+                            <option value="MB">MB</option>
+                            <option value="GB" selected>GB</option>
+                            <option value="TB">TB</option>
+                        </select>
+                        <button type="button" class="btn btn-secondary" onclick="setUnlimited(true)">Unlimited</button>
+                    </div>
+                    <div class="label-note">0 or Unlimited for no limit.</div>
+                </div>
+                <div class="form-group" style="margin-top: 16px;"><label for="editNotes">Notes</label><input type="text" id="editNotes" name="notes" placeholder="(Optional)"></div>
+                <div class="form-group" style="margin-top: 16px;"><label><input type="checkbox" id="resetTraffic" name="resetTraffic"> Reset Traffic Usage</label></div>
+                <div class="modal-footer">
+                    <button type="button" id="modalCancelBtn" class="btn btn-secondary">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save Changes</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const API_BASE = '/admin/api';
+            let allUsers = [];
+            const userList = document.getElementById('userList');
+            const createUserForm = document.getElementById('createUserForm');
+            const generateUUIDBtn = document.getElementById('generateUUID');
+            const uuidInput = document.getElementById('uuid');
+            const toast = document.getElementById('toast');
+            const editModal = document.getElementById('editModal');
+            const editUserForm = document.getElementById('editUserForm');
+            const selectAllCheckbox = document.getElementById('selectAll');
+            const deleteSelectedBtn = document.getElementById('deleteSelected');
+            const searchInput = document.getElementById('searchInput');
+            const dashboardStats = document.getElementById('dashboardStats');
+
+            function showToast(message, isError = false) {
+                toast.textContent = message;
+                toast.className = isError ? 'error' : 'success';
+                toast.classList.add('show');
+                setTimeout(() => { toast.classList.remove('show'); }, 3000);
+            }
+
+            const api = {
+                get: (endpoint) => fetch(\`\${API_BASE}\${endpoint}\`, { credentials: 'include' }).then(handleResponse),
+                post: (endpoint, body) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'POST', credentials: 'include', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) }).then(handleResponse),
+                put: (endpoint, body) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'PUT', credentials: 'include', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) }).then(handleResponse),
+                delete: (endpoint) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'DELETE', credentials: 'include' }).then(handleResponse),
+            };
+
+            async function handleResponse(response) {
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({ error: 'An unknown error occurred.' }));
+                    throw new Error(errorData.error || \`Request failed with status \${response.status}\`);
+                }
+                return response.status === 204 ? null : response.json();
+            }
+
+            const pad = (num) => num.toString().padStart(2, '0');
+
+            function localToUTC(dateStr, timeStr) {
+                if (!dateStr || !timeStr) return { utcDate: '', utcTime: '' };
+                const localDateTime = new Date(\`\${dateStr}T\${timeStr}\`);
+                if (isNaN(localDateTime)) return { utcDate: '', utcTime: '' };
+
+                const year = localDateTime.getUTCFullYear();
+                const month = pad(localDateTime.getUTCMonth() + 1);
+                const day = pad(localDateTime.getUTCDate());
+                const hours = pad(localDateTime.getUTCHours());
+                const minutes = pad(localDateTime.getUTCMinutes());
+                const seconds = pad(localDateTime.getUTCSeconds());
+
+                return {
+                    utcDate: \`\${year}-\${month}-\${day}\`,
+                    utcTime: \`\${hours}:\${minutes}:\${seconds}\`
+                };
+            }
+
+            function utcToLocal(utcDateStr, utcTimeStr) {
+                if (!utcDateStr || !utcTimeStr) return { localDate: '', localTime: '' };
+                const utcDateTime = new Date(\`\${utcDateStr}T\${utcTimeStr}Z\`);
+                if (isNaN(utcDateTime)) return { localDate: '', localTime: '' };
+
+                const year = utcDateTime.getFullYear();
+                const month = pad(utcDateTime.getMonth() + 1);
+                const day = pad(utcDateTime.getDate());
+                const hours = pad(utcDateTime.getHours());
+                const minutes = pad(utcDateTime.getMinutes());
+                const seconds = pad(utcDateTime.getSeconds());
+
+                return {
+                    localDate: \`\${year}-\${month}-\${day}\`,
+                    localTime: \`\${hours}:\${minutes}:\${seconds}\`
+                };
+            }
+
+            function addExpiryTime(dateInputId, timeInputId, amount, unit) {
+                const dateInput = document.getElementById(dateInputId);
+                const timeInput = document.getElementById(timeInputId);
+
+                let date = new Date(\`\${dateInput.value}T\${timeInput.value || '00:00:00'}\`);
+                if (isNaN(date.getTime())) {
+                    date = new Date();
+                }
+
+                if (unit === 'hour') date.setHours(date.getHours() + amount);
+                else if (unit === 'day') date.setDate(date.getDate() + amount);
+                else if (unit === 'month') date.setMonth(date.getMonth() + amount);
+
+                const year = date.getFullYear();
+                const month = pad(date.getMonth() + 1);
+                const day = pad(date.getDate());
+                const hours = pad(date.getHours());
+                const minutes = pad(date.getMinutes());
+                const seconds = pad(date.getSeconds());
+
+                dateInput.value = \`\${year}-\${month}-\${day}\`;
+                timeInput.value = \`\${hours}:\${minutes}:\${seconds}\`;
+            }
+
+            document.body.addEventListener('click', (e) => {
+                const target = e.target.closest('.time-quick-set-group button');
+                if (!target) return;
+                const group = target.closest('.time-quick-set-group');
+                addExpiryTime(
+                    group.dataset.targetDate,
+                    group.dataset.targetTime,
+                    parseInt(target.dataset.amount, 10),
+                    target.dataset.unit
+                );
+            });
+
+            function formatExpiryDateTime(expDateStr, expTimeStr) {
+                const expiryUTC = new Date(\`\${expDateStr}T\${expTimeStr}Z\`);
+                if (isNaN(expiryUTC)) return { local: 'Invalid Date', utc: '', relative: '', tehran: '', isExpired: true };
+
+                const now = new Date();
+                const isExpired = expiryUTC < now;
+
+                const commonOptions = {
+                    year: 'numeric', month: '2-digit', day: '2-digit',
+                    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZoneName: 'short'
+                };
+
+                const localTime = expiryUTC.toLocaleString(undefined, commonOptions);
+                const tehranTime = expiryUTC.toLocaleString('en-US', { ...commonOptions, timeZone: 'Asia/Tehran' });
+                const utcTime = expiryUTC.toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+
+                const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
+                const diffSeconds = (expiryUTC.getTime() - now.getTime()) / 1000;
+                let relativeTime = '';
+                if (Math.abs(diffSeconds) < 60) relativeTime = rtf.format(Math.round(diffSeconds), 'second');
+                else if (Math.abs(diffSeconds) < 3600) relativeTime = rtf.format(Math.round(diffSeconds / 60), 'minute');
+                else if (Math.abs(diffSeconds) < 86400) relativeTime = rtf.format(Math.round(diffSeconds / 3600), 'hour');
+                else relativeTime = rtf.format(Math.round(diffSeconds / 86400), 'day');
+
+                return { local: localTime, tehran: tehranTime, utc: utcTime, relative: relativeTime, isExpired };
+            }
+
+            function formatBytes(bytes, decimals = 2) {
+                if (bytes === 0) return '0 Bytes';
+                const k = 1024;
+                const dm = decimals < 0 ? 0 : decimals;
+                const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+                const i = Math.floor(Math.log(bytes) / Math.log(k));
+                return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+            }
+
+            function getDataLimitInBytes(value, unit) {
+                const numValue = parseFloat(value) || 0;
+                switch (unit) {
+                    case 'KB': return numValue * 1024;
+                    case 'MB': return numValue * 1024 * 1024;
+                    case 'GB': return numValue * 1024 * 1024 * 1024;
+                    case 'TB': return numValue * 1024 * 1024 * 1024 * 1024;
+                    default: return 0;
+                }
+            }
+
+            function setUnlimited(isEdit = false) {
+                const prefix = isEdit ? 'edit' : '';
+                document.getElementById(\`\${prefix}DataLimitValue\`).value = 0;
+                document.getElementById(\`\${prefix}DataLimitUnit\`).value = 'GB';
+            }
+
+            function getDataLimitFromInputs(isEdit = false) {
+                const prefix = isEdit ? 'edit' : '';
+                const value = document.getElementById(\`\${prefix}DataLimitValue\`).value;
+                const unit = document.getElementById(\`\${prefix}DataLimitUnit\`).value;
+                return getDataLimitInBytes(value, unit);
+            }
+
+            function setDataLimitInputs(dataLimit, isEdit = false) {
+                const prefix = isEdit ? 'edit' : '';
+                if (dataLimit === 0) {
+                    document.getElementById(\`\${prefix}DataLimitValue\`).value = 0;
+                    document.getElementById(\`\${prefix}DataLimitUnit\`).value = 'GB';
+                    return;
+                }
+                let unit = 'Bytes';
+                let value = dataLimit;
+                if (value >= 1024 * 1024 * 1024 * 1024) {
+                    value /= 1024 * 1024 * 1024 * 1024;
+                    unit = 'TB';
+                } else if (value >= 1024 * 1024 * 1024) {
+                    value /= 1024 * 1024 * 1024;
+                    unit = 'GB';
+                } else if (value >= 1024 * 1024) {
+                    value /= 1024 * 1024;
+                    unit = 'MB';
+                } else if (value >= 1024) {
+                    value /= 1024;
+                    unit = 'KB';
+                }
+                document.getElementById(\`\${prefix}DataLimitValue\`).value = value;
+                document.getElementById(\`\${prefix}DataLimitUnit\`).value = unit;
+            }
+
+            function renderDashboardStats(stats) {
+                dashboardStats.innerHTML = \`
+                    <div class="dashboard-stat">
+                        <h3>\${stats.totalUsers}</h3>
+                        <p>Total Users</p>
+                    </div>
+                    <div class="dashboard-stat">
+                        <h3>\${stats.activeUsers}</h3>
+                        <p>Active Users</p>
+                    </div>
+                    <div class="dashboard-stat">
+                        <h3>\${stats.expiredUsers}</h3>
+                        <p>Expired Users</p>
+                    </div>
+                    <div class="dashboard-stat">
+                        <h3>\${formatBytes(stats.totalTraffic)}</h3>
+                        <p>Total Traffic Used</p>
+                    </div>
+                \`;
+            }
+
+            function renderUsers(filteredUsers = allUsers) {
+                userList.innerHTML = '';
+                if (filteredUsers.length === 0) {
+                    userList.innerHTML = '<tr><td colspan="9" style="text-align:center;">No users found.</td></tr>';
+                } else {
+                    filteredUsers.forEach(user => {
+                        const expiry = formatExpiryDateTime(user.expiration_date, user.expiration_time);
+                        const isExpired = expiry.isExpired || (user.data_limit > 0 && user.used_traffic >= user.data_limit);
+                        const dataLimit = user.data_limit || 0;
+                        const usedTraffic = user.used_traffic || 0;
+                        const trafficText = dataLimit === 0 ? \`\${formatBytes(usedTraffic)} / Unlimited\` : \`\${formatBytes(usedTraffic)} / \${formatBytes(dataLimit)}\`;
+                        const progressPercent = dataLimit === 0 ? 0 : (usedTraffic / dataLimit) * 100;
+                        let progressClass = '';
+                        if (progressPercent > 90) progressClass = 'danger';
+                        else if (progressPercent > 70) progressClass = 'warning';
+                        const progressBar = \`<div class="progress-bar-container"><div class="progress-bar \${progressClass}" style="width: \${progressPercent}%"></div></div><div class="traffic-text">\${trafficText}</div>\`;
+                        const row = document.createElement('tr');
+                        row.innerHTML = \`
+                            <td><input type="checkbox" class="userSelect" data-uuid="\${user.uuid}"></td>
+                            <td><div class="uuid-cell" title="\${user.uuid}">\${user.uuid}</div></td>
+                            <td>\${new Date(user.created_at).toLocaleString()}</td>
+                            <td>
+                                <div class="time-display">
+                                    <span class="time-local" title="Your Local Time">\${expiry.local}</span>
+                                    <span class="time-utc" title="Coordinated Universal Time">\${expiry.utc}</span>
+                                    <span class="time-relative">\${expiry.relative}</span>
+                                </div>
+                            </td>
+                             <td>
+                                <div class="time-display">
+                                    <span class="time-local" title="Tehran Time (GMT+03:30)">\${expiry.tehran}</span>
+                                    <span class="time-utc">Asia/Tehran</span>
+                                </div>
+                            </td>
+                            <td><span class="status-badge \${isExpired ? 'status-expired' : 'status-active'}">\${isExpired ? 'Expired' : 'Active'}</span></td>
+                            <td>\${progressBar}</td>
+                            <td>\${user.notes || '-'}</td>
+                            <td>
+                                <div class="actions-cell">
+                                    <button class="btn btn-secondary btn-edit" data-uuid="\${user.uuid}">Edit</button>
+                                    <button class="btn btn-danger btn-delete" data-uuid="\${user.uuid}">Delete</button>
+                                </div>
+                            </td>
+                        \`;
+                        userList.appendChild(row);
+                    });
+                }
+            }
+
+            async function fetchAndRenderUsers() {
+                try {
+                    allUsers = await api.get('/users');
+                    allUsers.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+                    renderUsers();
+                } catch (error) { showToast(error.message, true); }
+            }
+
+            async function fetchAndRenderStats() {
+                try {
+                    const stats = await api.get('/stats');
+                    renderDashboardStats(stats);
+                } catch (error) { showToast(error.message, true); }
+            }
+
+            async function handleCreateUser(e) {
+                e.preventDefault();
+                const localDate = document.getElementById('expiryDate').value;
+                const localTime = document.getElementById('expiryTime').value;
+
+                const { utcDate, utcTime } = localToUTC(localDate, localTime);
+                if (!utcDate || !utcTime) return showToast('Invalid date or time entered.', true);
+
+                const userData = {
+                    uuid: uuidInput.value,
+                    exp_date: utcDate,
+                    exp_time: utcTime,
+                    data_limit: getDataLimitFromInputs(),
+                    notes: document.getElementById('notes').value
+                };
+
+                try {
+                    await api.post('/users', userData);
+                    showToast('User created successfully!');
+                    createUserForm.reset();
+                    uuidInput.value = crypto.randomUUID();
+                    setDefaultExpiry();
+                    await fetchAndRenderUsers();
+                    await fetchAndRenderStats();
+                } catch (error) { showToast(error.message, true); }
+            }
+
+            async function handleDeleteUser(uuid) {
+                if (confirm(\`Delete user \${uuid}?\`)) {
+                    try {
+                        await api.delete(\`/users/\${uuid}\`);
+                        showToast('User deleted successfully!');
+                        await fetchAndRenderUsers();
+                        await fetchAndRenderStats();
+                    } catch (error) { showToast(error.message, true); }
+                }
+            }
+
+            async function handleBulkDelete() {
+                const selectedUuids = Array.from(document.querySelectorAll('.userSelect:checked')).map(cb => cb.dataset.uuid);
+                if (selectedUuids.length === 0) return showToast('No users selected.', true);
+                if (confirm(\`Delete \${selectedUuids.length} selected users?\`)) {
+                    try {
+                        await api.post('/users/bulk-delete', { uuids: selectedUuids });
+                        showToast('Selected users deleted successfully!');
+                        await fetchAndRenderUsers();
+                        await fetchAndRenderStats();
+                    } catch (error) { showToast(error.message, true); }
+                }
+            }
+
+            function openEditModal(uuid) {
+                const user = allUsers.find(u => u.uuid === uuid);
+                if (!user) return showToast('User not found.', true);
+
+                const { localDate, localTime } = utcToLocal(user.expiration_date, user.expiration_time);
+
+                document.getElementById('editUuid').value = user.uuid;
+                document.getElementById('editExpiryDate').value = localDate;
+                document.getElementById('editExpiryTime').value = localTime;
+                setDataLimitInputs(user.data_limit, true);
+                document.getElementById('editNotes').value = user.notes || '';
+                document.getElementById('resetTraffic').checked = false;
+                editModal.classList.add('show');
+            }
+
+            function closeEditModal() { editModal.classList.remove('show'); }
+
+            async function handleEditUser(e) {
+                e.preventDefault();
+                const localDate = document.getElementById('editExpiryDate').value;
+                const localTime = document.getElementById('editExpiryTime').value;
+
+                const { utcDate, utcTime } = localToUTC(localDate, localTime);
+                if (!utcDate || !utcTime) return showToast('Invalid date or time entered.', true);
+
+                const updatedData = {
+                    exp_date: utcDate,
+                    exp_time: utcTime,
+                    data_limit: getDataLimitFromInputs(true),
+                    notes: document.getElementById('editNotes').value,
+                    reset_traffic: document.getElementById('resetTraffic').checked
+                };
+
+                try {
+                    await api.put(\`/users/\${document.getElementById('editUuid').value}\`, updatedData);
+                    showToast('User updated successfully!');
+                    closeEditModal();
+                    await fetchAndRenderUsers();
+                    await fetchAndRenderStats();
+                } catch (error) { showToast(error.message, true); }
+            }
+
+            function setDefaultExpiry() {
+                const now = new Date();
+                now.setDate(now.getDate() + 1); // Set expiry to 24 hours from now in LOCAL time
+
+                const year = now.getFullYear();
+                const month = pad(now.getMonth() + 1);
+                const day = pad(now.getDate());
+                const hours = pad(now.getHours());
+                const minutes = pad(now.getMinutes());
+                const seconds = pad(now.getSeconds());
+
+                document.getElementById('expiryDate').value = \`\${year}-\${month}-\${day}\`;
+                document.getElementById('expiryTime').value = \`\${hours}:\${minutes}:\${seconds}\`;
+            }
+
+            function handleSelectAll() {
+                const checkboxes = document.querySelectorAll('.userSelect');
+                checkboxes.forEach(cb => cb.checked = selectAllCheckbox.checked);
+            }
+
+            function handleSearch() {
+                const searchTerm = searchInput.value.toLowerCase();
+                const filtered = allUsers.filter(user => 
+                    user.uuid.toLowerCase().includes(searchTerm) || (user.notes || '').toLowerCase().includes(searchTerm)
+                );
+                renderUsers(filtered);
+            }
+
+            generateUUIDBtn.addEventListener('click', () => uuidInput.value = crypto.randomUUID());
+            createUserForm.addEventListener('submit', handleCreateUser);
+            editUserForm.addEventListener('submit', handleEditUser);
+            editModal.addEventListener('click', (e) => { if (e.target === editModal) closeEditModal(); });
+            document.getElementById('modalCloseBtn').addEventListener('click', closeEditModal);
+            document.getElementById('modalCancelBtn').addEventListener('click', closeEditModal);
+            userList.addEventListener('click', (e) => {
+                const target = e.target.closest('button');
+                if (!target) return;
+                const uuid = target.dataset.uuid;
+                if (target.classList.contains('btn-edit')) openEditModal(uuid);
+                else if (target.classList.contains('btn-delete')) handleDeleteUser(uuid);
+            });
+            selectAllCheckbox.addEventListener('change', handleSelectAll);
+            deleteSelectedBtn.addEventListener('click', handleBulkDelete);
+            searchInput.addEventListener('input', handleSearch);
+
+            setDefaultExpiry();
+            uuidInput.value = crypto.randomUUID();
+            fetchAndRenderUsers();
+            fetchAndRenderStats();
+        });
+    </script>
+</body>
+</html>`;
+
+async function isAdmin(request, env) {
+    const cookieHeader = request.headers.get('Cookie');
+    if (!cookieHeader) return false;
+
+    const token = cookieHeader.match(/auth_token=([^;]+)/)?.[1];
+    if (!token) return false;
+
+    const storedToken = await env.USER_KV.get('admin_session_token');
+
+    return storedToken && storedToken === token;
+}
+
+/**
+* --- Handles all incoming requests to /admin/* routes with API routing. ---
+* @param {Request} request
+* @param {object} env
+* @returns {Promise<Response>}
+*/
+async function handleAdminRequest(request, env) {
+    const url = new URL(request.url);
+    const { pathname } = url;
+    const jsonHeader = { 'Content-Type': 'application/json' };
+
+    if (!env.ADMIN_KEY) {
+        return new Response('Admin panel is not configured.', { status: 503 });
+    }
+
+    // --- API Routes ---
+    if (pathname.startsWith('/admin/api/')) {
+        if (!(await isAdmin(request, env))) {
+            return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: jsonHeader });
+        }
+        
+        // --- ENHANCEMENT: Basic CSRF protection for mutating requests ---
+        if (request.method !== 'GET') {
+            const origin = request.headers.get('Origin');
+            if (!origin || new URL(origin).hostname !== url.hostname) {
+                return new Response(JSON.stringify({ error: 'Invalid Origin' }), { status: 403, headers: jsonHeader });
+            }
+        }
+
+        // GET /admin/api/stats - Get dashboard stats
+        if (pathname === '/admin/api/stats' && request.method === 'GET') {
+            try {
+                const stats = await fetchDashboardStats(env);
+                return new Response(JSON.stringify(stats), { status: 200, headers: jsonHeader });
+            } catch (e) {
+                return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: jsonHeader });
+            }
+        }
+        
+        // GET /admin/api/users - List all users
+        if (pathname === '/admin/api/users' && request.method === 'GET') {
+            try {
+                const { results } = await env.DB.prepare("SELECT uuid, created_at, expiration_date, expiration_time, data_limit, used_traffic, notes FROM users ORDER BY created_at DESC").all();
+                return new Response(JSON.stringify(results ?? []), { status: 200, headers: jsonHeader });
+            } catch (e) {
+                return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: jsonHeader });
+            }
+        }
+
+        // POST /admin/api/users - Create a new user
+        if (pathname === '/admin/api/users' && request.method === 'POST') {
+             try {
+                const { uuid, exp_date: expDate, exp_time: expTime, data_limit, notes } = await request.json();
+
+                // Corrected and clarified validation logic
+                if (!uuid || !expDate || !expTime || !/^\d{4}-\d{2}-\d{2}$/.test(expDate) || !/^\d{2}:\d{2}:\d{2}$/.test(expTime)) {
+                    throw new Error('Invalid or missing fields. Use UUID, YYYY-MM-DD, and HH:MM:SS.');
+                }
+                 
+                await env.DB.prepare("INSERT INTO users (uuid, expiration_date, expiration_time, data_limit, used_traffic, notes) VALUES (?, ?, ?, ?, 0, ?)")
+                    .bind(uuid, expDate, expTime, data_limit || 0, notes || null).run();
+                await env.USER_KV.put(`user:${uuid}`, JSON.stringify({ exp_date: expDate, exp_time: expTime, data_limit: data_limit || 0, used_traffic: 0 }));
+                 
+                return new Response(JSON.stringify({ success: true, uuid }), { status: 201, headers: jsonHeader });
+            } catch (error) {
+                 if (error.message?.includes('UNIQUE constraint failed')) {
+                     return new Response(JSON.stringify({ error: 'A user with this UUID already exists.' }), { status: 409, headers: jsonHeader });
+                 }
+                 return new Response(JSON.stringify({ error: error.message }), { status: 400, headers: jsonHeader });
+            }
+        }
+         
+        // POST /admin/api/users/bulk-delete - Efficiently delete multiple users
+        if (pathname === '/admin/api/users/bulk-delete' && request.method === 'POST') {
+            try {
+                const { uuids } = await request.json();
+                if (!Array.isArray(uuids) || uuids.length === 0) {
+                    throw new Error('Invalid request body: Expected an array of UUIDs.');
+                }
+                 
+                const deleteUserStmt = env.DB.prepare("DELETE FROM users WHERE uuid = ?");
+                const stmts = uuids.map(uuid => deleteUserStmt.bind(uuid));
+                await env.DB.batch(stmts);
+
+                // Delete from KV in parallel for speed
+                await Promise.all(uuids.map(uuid => env.USER_KV.delete(`user:${uuid}`)));
+                 
+                return new Response(JSON.stringify({ success: true, count: uuids.length }), { status: 200, headers: jsonHeader });
+            } catch (error) {
+                return new Response(JSON.stringify({ error: error.message }), { status: 400, headers: jsonHeader });
+            }
+        }
+
+        // Matcher for single-user routes
+        const userRouteMatch = pathname.match(/^\/admin\/api\/users\/([a-f0-9-]+)$/);
+
+        // PUT /admin/api/users/:uuid - Update a single user
+        if (userRouteMatch && request.method === 'PUT') {
+            const uuid = userRouteMatch[1];
+            try {
+                const { exp_date: expDate, exp_time: expTime, data_limit, notes, reset_traffic } = await request.json();
+                if (!expDate || !expTime || !/^\d{4}-\d{2}-\d{2}$/.test(expDate) || !/^\d{2}:\d{2}:\d{2}$/.test(expTime)) {
+                    throw new Error('Invalid date/time fields. Use YYYY-MM-DD and HH:MM:SS.');
+                }
+                 
+                let query = "UPDATE users SET expiration_date = ?, expiration_time = ?, data_limit = ?, notes = ? WHERE uuid = ?";
+                let binds = [expDate, expTime, data_limit || 0, notes || null, uuid];
+                let usedTraffic = reset_traffic ? 0 : (await getUserData(env, uuid)).used_traffic;
+                if (reset_traffic) {
+                    query = "UPDATE users SET expiration_date = ?, expiration_time = ?, data_limit = ?, notes = ?, used_traffic = 0 WHERE uuid = ?";
+                    binds = [expDate, expTime, data_limit || 0, notes || null, uuid];
+                }
+                await env.DB.prepare(query).bind(...binds).run();
+                await env.USER_KV.put(`user:${uuid}`, JSON.stringify({ exp_date: expDate, exp_time: expTime, data_limit: data_limit || 0, used_traffic: usedTraffic }));
+                 
+                return new Response(JSON.stringify({ success: true, uuid }), { status: 200, headers: jsonHeader });
+            } catch (error) {
+                return new Response(JSON.stringify({ error: error.message }), { status: 400, headers: jsonHeader });
+            }
+        }
+         
+        // DELETE /admin/api/users/:uuid - Delete a single user
+        if (userRouteMatch && request.method === 'DELETE') {
+            const uuid = userRouteMatch[1];
+             try {
+                await env.DB.prepare("DELETE FROM users WHERE uuid = ?").bind(uuid).run();
+                await env.USER_KV.delete(`user:${uuid}`);
+                return new Response(JSON.stringify({ success: true, uuid }), { status: 200, headers: jsonHeader });
+            } catch (error) {
+                return new Response(JSON.stringify({ error: error.message }), { status: 500, headers: jsonHeader });
+            }
+        }
+         
+        return new Response(JSON.stringify({ error: 'API route not found' }), { status: 404, headers: jsonHeader });
+    }
+
+    // --- Page Serving Routes (/admin) ---
+    if (pathname === '/admin') {
+        if (request.method === 'POST') {
+            const formData = await request.formData();
+            if (formData.get('password') === env.ADMIN_KEY) {
+                const token = crypto.randomUUID();
+                await env.USER_KV.put('admin_session_token', token, { expirationTtl: 86400 }); // 24 hour session
+                return new Response(null, {
+                    status: 302,
+                    headers: { 'Location': '/admin', 'Set-Cookie': `auth_token=${token}; HttpOnly; Secure; Path=/admin; Max-Age=86400; SameSite=Strict` },
+                });
+            } else {
+                const loginPageWithError = adminLoginHTML.replace('</form>', '</form><p class="error">Invalid password.</p>');
+                return new Response(loginPageWithError, { status: 401, headers: { 'Content-Type': 'text/html;charset=utf-8' } });
+            }
+        }
+         
+        if (request.method === 'GET') {
+            return new Response(await isAdmin(request, env) ? adminPanelHTML : adminLoginHTML, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
+        }
+         
+        return new Response('Method Not Allowed', { status: 405 });
+    }
+
+    return new Response('Not found', { status: 404 });
+}
+
+// --- Original Code (Config, Handlers, etc.) --- (unchanged, just improved with traffic check)
+const Config = {
+  userID: 'd342d11e-d424-4583-b36e-524ab1f0afa4',
   proxyIPs: ['nima.nscl.ir:443'],
-  
   scamalytics: {
     username: 'revilseptember',
     apiKey: 'b2fc368184deb3d8ac914bd776b8215fe899dd8fef69fbaba77511acfbdeca0d',
     baseUrl: 'https://api12.scamalytics.com/v3/',
   },
-
   socks5: {
     enabled: false,
     relayMode: false,
     address: '',
   },
-
-  /**
-   * @param {{ PROXYIP: string; UUID: any; SCAMALYTICS_USERNAME: any; SCAMALYTICS_API_KEY: any; SCAMALYTICS_BASEURL: any; SOCKS5: any; SOCKS5_RELAY: string; }} env
-   */
   fromEnv(env) {
-    const selectedProxyIP =
-      env.PROXYIP || this.proxyIPs[Math.floor(Math.random() * this.proxyIPs.length)];
+    const selectedProxyIP = env.PROXYIP || this.proxyIPs[Math.floor(Math.random() * this.proxyIPs.length)];
     const [proxyHost, proxyPort = '443'] = selectedProxyIP.split(':');
-
     return {
       userID: env.UUID || this.userID,
       proxyIP: proxyHost,
@@ -66,12 +974,6 @@ const CONST = {
   WS_READY_STATE_CLOSING: 2,
 };
 
-/**
- * Generates a random path string for WebSocket connection.
- * @param {number} length - Length of the random path part.
- * @param {string} [query] - Optional query string to append (e.g., 'ed=2048').
- * @returns {string} The generated path.
- */
 function generateRandomPath(length = 12, query = '') {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
   let result = '';
@@ -82,16 +984,13 @@ function generateRandomPath(length = 12, query = '') {
 }
 
 const CORE_PRESETS = {
-  // --- Xray cores – Dream ---
   xray: {
-    tls: { path: () => generateRandomPath(12, 'ed=2048'), security: 'tls',  fp: 'chrome',  alpn: 'http/1.1', extra: {} },
-    tcp: { path: () => generateRandomPath(12, 'ed=2048'), security: 'none', fp: 'chrome',                extra: {} },
+    tls: { path: () => generateRandomPath(12, 'ed=2048'), security: 'tls', fp: 'chrome', alpn: 'http/1.1', extra: {} },
+    tcp: { path: () => generateRandomPath(12, 'ed=2048'), security: 'none', fp: 'chrome', extra: {} },
   },
-
-  // ---Singbox cores – Freedom ---
   sb: {
-    tls: { path: () => generateRandomPath(18), security: 'tls',  fp: 'firefox', alpn: 'h3', extra: CONST.ED_PARAMS },
-    tcp: { path: () => generateRandomPath(18), security: 'none', fp: 'firefox',             extra: CONST.ED_PARAMS },
+    tls: { path: () => generateRandomPath(18), security: 'tls', fp: 'firefox', alpn: 'h3', extra: CONST.ED_PARAMS },
+    tcp: { path: () => generateRandomPath(18), security: 'none', fp: 'firefox', extra: CONST.ED_PARAMS },
   },
 };
 
@@ -99,23 +998,17 @@ function makeName(tag, proto) {
   return `${tag}-${proto.toUpperCase()}`;
 }
 
-function createVlessLink({
-  userID, address, port, host, path,
-  security, sni, fp, alpn, extra = {}, name,
-}) {
+function createVlessLink({ userID, address, port, host, path, security, sni, fp, alpn, extra = {}, name }) {
   const params = new URLSearchParams({
     type: 'ws',
     host,
     path,
   });
-
   if (security) params.set('security', security);
-  if (sni)      params.set('sni',      sni);
-  if (fp)       params.set('fp',       fp);
-  if (alpn)     params.set('alpn',     alpn);
-
+  if (sni) params.set('sni', sni);
+  if (fp) params.set('fp', fp);
+  if (alpn) params.set('alpn', alpn);
   for (const [k, v] of Object.entries(extra)) params.set(k, v);
-
   return `vless://${userID}@${address}:${port}?${params.toString()}#${encodeURIComponent(name)}`;
 }
 
@@ -136,13 +1029,8 @@ function buildLink({ core, proto, userID, hostName, address, port, tag }) {
   });
 }
 
-const pick = (/** @type {string | any[]} */ arr) => arr[Math.floor(Math.random() * arr.length)];
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
-/**
- * @param {string} core
- * @param {any} userID
- * @param {string} hostName
- */
 async function handleIpSubscription(core, userID, hostName) {
   const mainDomains = [
     hostName, 'creativecommons.org', 'www.speedtest.net',
@@ -152,7 +1040,7 @@ async function handleIpSubscription(core, userID, hostName) {
   ];
 
   const httpsPorts = [443, 8443, 2053, 2083, 2087, 2096];
-  const httpPorts  = [ 80, 8080, 8880, 2052, 2082, 2086, 2095];
+  const httpPorts = [80, 8080, 8880, 2052, 2082, 2086, 2095];
 
   let links = [];
 
@@ -165,7 +1053,7 @@ async function handleIpSubscription(core, userID, hostName) {
 
     if (!isPagesDeployment) {
       links.push(
-        buildLink({ core, proto: 'tcp', userID, hostName, address: domain, port: pick(httpPorts),  tag: `D${i+1}` })
+        buildLink({ core, proto: 'tcp', userID, hostName, address: domain, port: pick(httpPorts), tag: `D${i+1}` })
       );
     }
   });
@@ -174,7 +1062,7 @@ async function handleIpSubscription(core, userID, hostName) {
     const r = await fetch('https://raw.githubusercontent.com/NiREvil/vless/refs/heads/main/Cloudflare-IPs.json');
     if (r.ok) {
       const json = await r.json();
-      const ips = [...(json.ipv4||[]), ...(json.ipv6||[])].slice(0, 20).map(x => x.ip);
+      const ips = [...(json.ipv4 ?? []), ...(json.ipv6 ?? [])].slice(0, 20).map(x => x.ip);
       ips.forEach((ip, i) => {
         const formattedAddress = ip.includes(':') ? `[${ip}]` : ip;
         links.push(
@@ -183,7 +1071,7 @@ async function handleIpSubscription(core, userID, hostName) {
 
         if (!isPagesDeployment) {
           links.push(
-            buildLink({ core, proto: 'tcp', userID, hostName, address: formattedAddress, port: pick(httpPorts),  tag: `IP${i+1}` })
+            buildLink({ core, proto: 'tcp', userID, hostName, address: formattedAddress, port: pick(httpPorts), tag: `IP${i+1}` })
           );
         }
       });
@@ -196,17 +1084,16 @@ async function handleIpSubscription(core, userID, hostName) {
 }
 
 export default {
-  /**
-   * @param {Request<any, CfProperties<any>>} request
-   * @param {{ PROXYIP: string; UUID: any; SCAMALYTICS_USERNAME: any; SCAMALYTICS_API_KEY: any; SCAMALYTICS_BASEURL: any; SOCKS5: any; SOCKS5_RELAY: string; }} env
-   * @param {any} ctx
-   */
   async fetch(request, env, ctx) {
     const cfg = Config.fromEnv(env);
     const url = new URL(request.url);
-    
+
+    if (url.pathname.startsWith('/admin')) {
+      return handleAdminRequest(request, env);
+    }
+
     const upgradeHeader = request.headers.get('Upgrade');
-    if (upgradeHeader && upgradeHeader.toLowerCase() === 'websocket') {
+    if (upgradeHeader?.toLowerCase() === 'websocket') {
       const requestConfig = {
         userID: cfg.userID,
         proxyIP: cfg.proxyIP,
@@ -214,146 +1101,91 @@ export default {
         socks5Address: cfg.socks5.address,
         socks5Relay: cfg.socks5.relayMode,
         enableSocks: cfg.socks5.enabled,
-        parsedSocks5Address: cfg.socks5.enabled
-          ? socks5AddressParser(cfg.socks5.address)
-          : {},
+        parsedSocks5Address: cfg.socks5.enabled ? socks5AddressParser(cfg.socks5.address) : {},
       };
-
-      return ProtocolOverWSHandler(request, requestConfig);
+      return await ProtocolOverWSHandler(request, requestConfig, env);
     }
-    
-    if (url.pathname === '/scamalytics-lookup')
-      return handleScamalyticsLookup(request, cfg);
 
-    if (url.pathname.startsWith(`/xray/${cfg.userID}`))
-      return handleIpSubscription('xray', cfg.userID, url.hostname);
+    if (url.pathname === '/scamalytics-lookup') {
+        return handleScamalyticsLookup(request, cfg);
+    }
 
-    if (url.pathname.startsWith(`/sb/${cfg.userID}`))
-      return handleIpSubscription('sb', cfg.userID, url.hostname);
+    const handleSubscription = async (core) => {
+      const uuid = url.pathname.slice(`/${core}/`.length);
+      if (!isValidUUID(uuid)) return new Response('Invalid UUID', { status: 400 });
+      const userData = await getUserData(env, uuid);
+      if (!userData || !(await checkExpiration(userData.exp_date, userData.exp_time)) || (userData.data_limit > 0 && userData.used_traffic >= userData.data_limit)) {
+        return new Response('Invalid or expired user or traffic limit reached', { status: 403 });
+      }
+      return handleIpSubscription(core, uuid, url.hostname);
+    };
 
-    if (url.pathname.startsWith(`/${cfg.userID}`))
-      return handleConfigPage(cfg.userID, url.hostname, cfg.proxyAddress);
+    if (url.pathname.startsWith('/xray/')) {
+      return handleSubscription('xray');
+    }
 
-    return new Response('UUID not found. Please set the UUID environment variable in the Cloudflare dashboard.', { status: 404 });
+    if (url.pathname.startsWith('/sb/')) {
+      return handleSubscription('sb');
+    }
+
+    const path = url.pathname.slice(1);
+    if (isValidUUID(path)) {
+      const userData = await getUserData(env, path);
+      if (!userData || !(await checkExpiration(userData.exp_date, userData.exp_time)) || (userData.data_limit > 0 && userData.used_traffic >= userData.data_limit)) {
+        return new Response('Invalid or expired user or traffic limit reached', { status: 403 });
+      }
+      return handleConfigPage(path, url.hostname, cfg.proxyAddress, userData.exp_date, userData.exp_time, userData.data_limit, userData.used_traffic);
+    }
+     
+    if (env.ROOT_PROXY_URL) {
+      try {
+        const proxyUrl = new URL(env.ROOT_PROXY_URL);
+        const targetUrl = new URL(request.url);
+
+        targetUrl.hostname = proxyUrl.hostname;
+        targetUrl.protocol = proxyUrl.protocol;
+        targetUrl.port = proxyUrl.port;
+         
+        const newRequest = new Request(targetUrl, request);
+         
+        newRequest.headers.set('Host', proxyUrl.hostname);
+        newRequest.headers.set('X-Forwarded-For', request.headers.get('CF-Connecting-IP'));
+        newRequest.headers.set('X-Forwarded-Proto', 'https');
+         
+        const response = await fetch(newRequest);
+         
+        const mutableHeaders = new Headers(response.headers);
+        mutableHeaders.delete('Content-Security-Policy');
+        mutableHeaders.delete('Content-Security-Policy-Report-Only');
+        mutableHeaders.delete('X-Frame-Options');
+
+        return new Response(response.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: mutableHeaders
+        });
+
+      } catch (e) {
+        console.error(`Reverse Proxy Error: ${e.message}`);
+        return new Response(`Proxy configuration error or upstream server is down. Please check the ROOT_PROXY_URL variable. Error: ${e.message}`, { status: 502 });
+      }
+    }
+
+    return new Response('Not found', { status: 404 });
   },
 };
 
-/**
- * Performs Scamalytics IP lookup using API.
- * @param {Request} request
- * @param {object} config
- * @returns {Promise<Response>}
- */
-async function handleScamalyticsLookup(request, config) {
-  const url = new URL(request.url);
-  const ipToLookup = url.searchParams.get('ip');
-  if (!ipToLookup) {
-    return new Response(JSON.stringify({ error: 'Missing IP parameter' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
-
-  const { username, apiKey, baseUrl } = config.scamalytics;
-  if (!username || !apiKey) {
-    return new Response(JSON.stringify({ error: 'Scamalytics API credentials not configured.' }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
-
-  const scamalyticsUrl = `${baseUrl}${username}/?key=${apiKey}&ip=${ipToLookup}`;
-  const headers = new Headers({
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-  });
-
-  try {
-    const scamalyticsResponse = await fetch(scamalyticsUrl);
-    const responseBody = await scamalyticsResponse.json();
-    return new Response(JSON.stringify(responseBody), { headers });
-  } catch (error) {
-    return new Response(JSON.stringify({ error: error.toString() }), {
-      status: 500,
-      headers,
-    });
-  }
-}
-
-/**
- * @param {any} userID
- * @param {string} hostName
- * @param {string} proxyAddress
- */
-function handleConfigPage(userID, hostName, proxyAddress) {
-  const html = generateBeautifulConfigPage(userID, hostName, proxyAddress);
-  return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
-}
-
-/**
- * @param {any} userID
- * @param {string} hostName
- * @param {string} proxyAddress
- */
-function generateBeautifulConfigPage(userID, hostName, proxyAddress) {
-  const dream = buildLink({
-    core: 'xray', proto: 'tls', userID, hostName,
-    address: hostName, port: 443, tag: `${hostName}-Xray`,
-  });
-
-  const freedom = buildLink({
-    core: 'sb',   proto: 'tls', userID, hostName,
-    address: hostName, port: 443, tag: `${hostName}-Singbox`,
-  });
-  
-  const configs = { dream, freedom };
-  const subXrayUrl = `https://${hostName}/xray/${userID}`;
-  const subSbUrl   = `https://${hostName}/sb/${userID}`;
-  
-  const clientUrls = {
-    clashMeta: `clash://install-config?url=${encodeURIComponent(`https://revil-sub.pages.dev/sub/clash-meta?url=${subSbUrl}&remote_config=&udp=false&ss_uot=false&show_host=false&forced_ws0rtt=true`)}`,
-    hiddify: `hiddify://install-config?url=${encodeURIComponent(subXrayUrl)}`,
-    v2rayng: `v2rayng://install-config?url=${encodeURIComponent(subXrayUrl)}`,
-    exclave: `sn://subscription?url=${encodeURIComponent(subSbUrl)}`,
-  };
-
-  let finalHTML = `
-  <!doctype html>
-  <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>VLESS Proxy Configuration</title>
-    <link rel="icon" href="https://raw.githubusercontent.com/NiREvil/zizifn/refs/heads/Legacy/assets/favicon.png" type="image/png">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@300..700&display=swap" rel="stylesheet">
-    <style>${getPageCSS()}</style> 
-  </head>
-  <body data-proxy-ip="${proxyAddress}">
-    ${getPageHTML(configs, clientUrls)}
-    <script>${getPageScript()}</script>
-  </body>
-  </html>`;
-
-  return finalHTML;
-}
-
-/**
- * Core vless protocol logic
- * Handles VLESS protocol over WebSocket.
- * @param {Request} request
- * @param {object} config
- * @returns {Promise<Response>}
- */
-async function ProtocolOverWSHandler(request, config) {
+async function ProtocolOverWSHandler(request, config, env) {
   const webSocketPair = new WebSocketPair();
   const [client, webSocket] = Object.values(webSocketPair);
   webSocket.accept();
   let address = '';
   let portWithRandomLog = '';
   let udpStreamWriter = null;
-  const log = (/** @type {string} */ info, /** @type {undefined} */ event) => {
+  let incomingTraffic = 0;
+  let outgoingTraffic = 0;
+  let uuid = '';
+  const log = (info, event) => {
     console.log(`[${address}:${portWithRandomLog}] ${info}`, event || '');
   };
   const earlyDataHeader = request.headers.get('Sec-WebSocket-Protocol') || '';
@@ -365,6 +1197,7 @@ async function ProtocolOverWSHandler(request, config) {
     .pipeTo(
       new WritableStream({
         async write(chunk, controller) {
+          outgoingTraffic += chunk.byteLength;
           if (udpStreamWriter) {
             return udpStreamWriter.write(chunk);
           }
@@ -385,14 +1218,17 @@ async function ProtocolOverWSHandler(request, config) {
             rawDataIndex,
             ProtocolVersion = new Uint8Array([0, 0]),
             isUDP,
-          } = ProcessProtocolHeader(chunk, config.userID);
+          } = await ProcessProtocolHeader(chunk, env);
 
           address = addressRemote;
-          portWithRandomLog = `${portRemote}--${Math.random()} ${isUDP ? 'udp' : 'tcp'} `;
+          portWithRandomLog = `${portRemote}--${Math.random()} ${isUDP ? 'udp' : 'tcp'}` ;
 
           if (hasError) {
-            throw new Error(message);
+            controller.error(message);
+            return;
           }
+
+          uuid = stringify(new Uint8Array(chunk.slice(1, 17))); // Extract UUID from buffer
 
           const vlessResponseHeader = new Uint8Array([ProtocolVersion[0], 0]);
           const rawClientData = chunk.slice(rawDataIndex);
@@ -401,9 +1237,9 @@ async function ProtocolOverWSHandler(request, config) {
             if (portRemote === 53) {
               const dnsPipeline = await createDnsPipeline(webSocket, vlessResponseHeader, log);
               udpStreamWriter = dnsPipeline.write;
-              udpStreamWriter(rawClientData);
+              await udpStreamWriter(rawClientData);
             } else {
-              throw new Error('UDP proxy is only enabled for DNS (port 53)');
+              controller.error('UDP proxy only for DNS (port 53)');
             }
             return;
           }
@@ -421,40 +1257,78 @@ async function ProtocolOverWSHandler(request, config) {
           );
         },
         close() {
-          log(`readableWebSocketStream closed`);
+          log('readableWebSocketStream closed');
+          if (uuid) updateUsedTraffic(env, uuid, incomingTraffic + outgoingTraffic);
         },
         abort(err) {
-          log(`readableWebSocketStream aborted`, err);
+          log('readableWebSocketStream aborted', err);
+          if (uuid) updateUsedTraffic(env, uuid, incomingTraffic + outgoingTraffic);
         },
       }),
     )
     .catch(err => {
       console.error('Pipeline failed:', err.stack || err);
+      if (uuid) updateUsedTraffic(env, uuid, incomingTraffic + outgoingTraffic);
     });
 
   return new Response(null, { status: 101, webSocket: client });
 }
 
-/**
- * @param {string} uuid
- */
-function isValidUUID(uuid) {
-  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-  return uuidRegex.test(uuid);
+async function ProcessProtocolHeader(protocolBuffer, env) {
+  if (protocolBuffer.byteLength < 24) return { hasError: true, message: 'invalid data' };
+
+  const dataView = new DataView(protocolBuffer);
+  const version = dataView.getUint8(0);
+  const slicedBufferString = stringify(new Uint8Array(protocolBuffer.slice(1, 17)));
+
+  const userData = await getUserData(env, slicedBufferString);
+
+  if (!userData || !(await checkExpiration(userData.exp_date, userData.exp_time)) || (userData.data_limit > 0 && userData.used_traffic >= userData.data_limit)) {
+    return { hasError: true, message: 'invalid or expired user or traffic limit reached' };
+  }
+
+  const optLength = dataView.getUint8(17);
+  const command = dataView.getUint8(18 + optLength);
+  if (command !== 1 && command !== 2) return { hasError: true, message: `command ${command} is not supported` };
+
+  const portIndex = 18 + optLength + 1;
+  const portRemote = dataView.getUint16(portIndex);
+  const addressType = dataView.getUint8(portIndex + 2);
+  let addressValue, addressLength, addressValueIndex;
+
+  switch (addressType) {
+    case 1: // IPv4
+      addressLength = 4;
+      addressValueIndex = portIndex + 3;
+      addressValue = new Uint8Array(protocolBuffer.slice(addressValueIndex, addressValueIndex + addressLength)).join('.');
+      break;
+    case 2: // Domain
+      addressLength = dataView.getUint8(portIndex + 3);
+      addressValueIndex = portIndex + 4;
+      addressValue = new TextDecoder().decode(protocolBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
+      break;
+    case 3: // IPv6
+      addressLength = 16;
+      addressValueIndex = portIndex + 3;
+      addressValue = Array.from({ length: 8 }, (_, i) => dataView.getUint16(addressValueIndex + i * 2).toString(16)).join(':');
+      break;
+    default:
+      return { hasError: true, message: `invalid addressType: ${addressType}` };
+  }
+
+  if (!addressValue) return { hasError: true, message: `addressValue is empty, addressType is ${addressType}` };
+
+  return {
+    hasError: false,
+    addressRemote: addressValue,
+    addressType,
+    portRemote,
+    rawDataIndex: addressValueIndex + addressLength,
+    ProtocolVersion: new Uint8Array([version]),
+    isUDP: command === 2,
+  };
 }
 
-/**
- * Handles TCP outbound logic for VLESS.
- * @param {{ value: any; }} remoteSocket
- * @param {number} addressType
- * @param {string} addressRemote
- * @param {number} portRemote
- * @param {any} rawClientData
- * @param {WebSocket} webSocket
- * @param {Uint8Array} protocolResponseHeader
- * @param {{ (info: any, event: any): void; (arg0: string): void; }} log
- * @param {{ socks5Relay: any; parsedSocks5Address: any; enableSocks: any; proxyIP: any; proxyPort: any; userID?: string; socks5Address?: string; }} config
- */
 async function HandleTCPOutBound(
   remoteSocket,
   addressType,
@@ -466,22 +1340,6 @@ async function HandleTCPOutBound(
   log,
   config,
 ) {
-  if (!config) {
-    config = {
-      userID: 'd342d11e-d424-4583-b36e-524ab1f0afa4',
-      socks5Address: '',
-      socks5Relay: false,
-      proxyIP: 'nima.nscl.ir',
-      proxyPort: '443',
-      enableSocks: false,
-      parsedSocks5Address: {},
-    };
-  }
-
-  /**
-   * @param {string} address
-   * @param {number} port
-   */
   async function connectAndWrite(address, port, socks = false) {
     let tcpSocket;
     if (config.socks5Relay) {
@@ -503,10 +1361,10 @@ async function HandleTCPOutBound(
     const tcpSocket = config.enableSocks
       ? await connectAndWrite(addressRemote, portRemote, true)
       : await connectAndWrite(
-        config.proxyIP || addressRemote,
-        config.proxyPort || portRemote,
-        false,
-      );
+          config.proxyIP || addressRemote,
+          config.proxyPort || portRemote,
+          false,
+        );
 
     tcpSocket.closed
       .catch(error => {
@@ -522,21 +1380,15 @@ async function HandleTCPOutBound(
   RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, retry, log);
 }
 
-/**
- * Converts WebSocket messages to a readable stream.
- * @param {WebSocket} webSocketServer
- * @param {string} earlyDataHeader
- * @param {{ (info: any, event: any): void; (arg0: string): void; }} log
- */
 function MakeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
   return new ReadableStream({
     start(controller) {
-      webSocketServer.addEventListener('message', (/** @type {{ data: any; }} */ event) => controller.enqueue(event.data));
+      webSocketServer.addEventListener('message', (event) => controller.enqueue(event.data));
       webSocketServer.addEventListener('close', () => {
         safeCloseWebSocket(webSocketServer);
         controller.close();
       });
-      webSocketServer.addEventListener('error', (/** @type {any} */ err) => {
+      webSocketServer.addEventListener('error', (err) => {
         log('webSocketServer has error');
         controller.error(err);
       });
@@ -552,87 +1404,14 @@ function MakeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
   });
 }
 
-
-/**
- * Parses and validates VLESS protocol header.
- * @param {ArrayBufferLike & { BYTES_PER_ELEMENT?: never; }} protocolBuffer
- * @param {string} userID
- */
-function ProcessProtocolHeader(protocolBuffer, userID) {
-  if (protocolBuffer.byteLength < 24) return { hasError: true, message: 'invalid data' };
-
-  const dataView = new DataView(protocolBuffer);
-  const version = dataView.getUint8(0);
-  const slicedBufferString = stringify(new Uint8Array(protocolBuffer.slice(1, 17)));
-  const uuids = userID.split(',').map((/** @type {string} */ id) => id.trim());
-  const isValidUser = uuids.some((/** @type {string} */ uuid) => slicedBufferString === uuid);
-
-  if (!isValidUser) return { hasError: true, message: 'invalid user' };
-
-  const optLength = dataView.getUint8(17);
-  const command = dataView.getUint8(18 + optLength);
-  if (command !== 1 && command !== 2)
-    return { hasError: true, message: `command ${command} is not supported` };
-
-  const portIndex = 18 + optLength + 1;
-  const portRemote = dataView.getUint16(portIndex);
-  const addressType = dataView.getUint8(portIndex + 2);
-  let addressValue, addressLength, addressValueIndex;
-
-  switch (addressType) {
-    case 1: // IPv4
-      addressLength = 4;
-      addressValueIndex = portIndex + 3;
-      addressValue = new Uint8Array(
-        protocolBuffer.slice(addressValueIndex, addressValueIndex + addressLength),
-      ).join('.');
-      break;
-    case 2: // Domain
-      addressLength = dataView.getUint8(portIndex + 3);
-      addressValueIndex = portIndex + 4;
-      addressValue = new TextDecoder().decode(
-        protocolBuffer.slice(addressValueIndex, addressValueIndex + addressLength),
-      );
-      break;
-    case 3: // IPv6
-      addressLength = 16;
-      addressValueIndex = portIndex + 3;
-      addressValue = Array.from({ length: 8 }, (_, i) =>
-        dataView.getUint16(addressValueIndex + i * 2).toString(16),
-      ).join(':');
-      break;
-    default:
-      return { hasError: true, message: `invalid addressType: ${addressType}` };
-  }
-
-  if (!addressValue)
-    return { hasError: true, message: `addressValue is empty, addressType is ${addressType}` };
-
-  return {
-    hasError: false,
-    addressRemote: addressValue,
-    addressType,
-    portRemote,
-    rawDataIndex: addressValueIndex + addressLength,
-    ProtocolVersion: new Uint8Array([version]),
-    isUDP: command === 2,
-  };
-}
-
-/**
- * Pipes remote socket data to WebSocket.
- * @param {Socket} remoteSocket
- * @param {WebSocket} webSocket
- * @param {string | Uint8Array | ArrayBuffer | ArrayBufferView | Blob} protocolResponseHeader
- * @param {{ (): Promise<void>; (): any; }} retry
- * @param {{ (info: any, event: any): void; (arg0: string): void; (info: any, event: any): void; (arg0: string): void; (arg0: string): void; }} log
- */
 async function RemoteSocketToWS(remoteSocket, webSocket, protocolResponseHeader, retry, log) {
   let hasIncomingData = false;
+  let incomingTraffic = 0;
   try {
     await remoteSocket.readable.pipeTo(
       new WritableStream({
         async write(chunk) {
+          incomingTraffic += chunk.byteLength;
           if (webSocket.readyState !== CONST.WS_READY_STATE_OPEN)
             throw new Error('WebSocket is not open');
           hasIncomingData = true;
@@ -646,24 +1425,20 @@ async function RemoteSocketToWS(remoteSocket, webSocket, protocolResponseHeader,
           log(`Remote connection readable closed. Had incoming data: ${hasIncomingData}`);
         },
         abort(reason) {
-          console.error(`Remote connection readable aborted:`, reason);
+          console.error('Remote connection readable aborted:', reason);
         },
       }),
     );
   } catch (error) {
-    console.error(`RemoteSocketToWS error:`, error.stack || error);
+    console.error('RemoteSocketToWS error:', error.stack || error);
     safeCloseWebSocket(webSocket);
   }
   if (!hasIncomingData && retry) {
-    log(`No incoming data, retrying`);
-    await retry();
+    log('No incoming data, retrying');
+    retry();
   }
 }
 
-/**
- * decodes base64 string to ArrayBuffer.
- * @param {string} base64Str
- */
 function base64ToArrayBuffer(base64Str) {
   if (!base64Str) return { earlyData: null, error: null };
   try {
@@ -679,10 +1454,6 @@ function base64ToArrayBuffer(base64Str) {
   }
 }
 
-/**
- * Safely closes a WebSocket connection.
- * @param {{ readyState: number; close: () => void; }} socket
- */
 function safeCloseWebSocket(socket) {
   try {
     if (
@@ -698,9 +1469,6 @@ function safeCloseWebSocket(socket) {
 
 const byteToHex = Array.from({ length: 256 }, (_, i) => (i + 0x100).toString(16).slice(1));
 
-/*
- * @param {Uint8Array | (string | number)[]} arr
- */
 function unsafeStringify(arr, offset = 0) {
   return (
     byteToHex[arr[offset]] +
@@ -726,27 +1494,16 @@ function unsafeStringify(arr, offset = 0) {
   ).toLowerCase();
 }
 
-/*
- * @param {Uint8Array} arr
- */
 function stringify(arr, offset = 0) {
   const uuid = unsafeStringify(arr, offset);
   if (!isValidUUID(uuid)) throw new TypeError('Stringified UUID is invalid');
   return uuid;
 }
 
-/**
- * DNS pipeline for UDP DNS requests, using DNS-over-HTTPS, (REvil Method).
- * @param {WebSocket} webSocket
- * @param {Uint8Array} vlessResponseHeader
- * @param {Function} log
- * @returns {Promise<{write: Function}>}
- */
 async function createDnsPipeline(webSocket, vlessResponseHeader, log) {
   let isHeaderSent = false;
   const transformStream = new TransformStream({
     transform(chunk, controller) {
-      // Parse UDP packets from VLESS framing
       for (let index = 0; index < chunk.byteLength;) {
         const lengthBuffer = chunk.slice(index, index + 2);
         const udpPacketLength = new DataView(lengthBuffer).getUint16(0);
@@ -762,8 +1519,7 @@ async function createDnsPipeline(webSocket, vlessResponseHeader, log) {
       new WritableStream({
         async write(chunk) {
           try {
-            // Send DNS query using DoH
-            const resp = await fetch(`https://1.1.1.1/dns-query`, {
+            const resp = await fetch('https://1.1.1.1/dns-query', {
               method: 'POST',
               headers: { 'content-type': 'application/dns-message' },
               body: chunk,
@@ -799,18 +1555,10 @@ async function createDnsPipeline(webSocket, vlessResponseHeader, log) {
 
   const writer = transformStream.writable.getWriter();
   return {
-    write: (/** @type {any} */ chunk) => writer.write(chunk),
+    write: (chunk) => writer.write(chunk),
   };
 }
 
-/**
- * SOCKS5 TCP connection logic.
- * @param {any} addressType
- * @param {string} addressRemote
- * @param {number} portRemote
- * @param {any} log
- * @param {{ username: any; password: any; hostname: any; port: any; }} parsedSocks5Addr
- */
 async function socks5Connect(addressType, addressRemote, portRemote, log, parsedSocks5Addr) {
   const { username, password, hostname, port } = parsedSocks5Addr;
   const socket = connect({ hostname, port });
@@ -850,7 +1598,7 @@ async function socks5Connect(addressType, addressRemote, portRemote, log, parsed
         4,
         ...addressRemote
           .split(':')
-          .flatMap((/** @type {string} */ x) => [parseInt(x.slice(0, 2), 16), parseInt(x.slice(2), 16)]),
+          .flatMap((x) => [parseInt(x.slice(0, 2), 16), parseInt(x.slice(2), 16)]),
       ]);
       break;
     default:
@@ -867,11 +1615,6 @@ async function socks5Connect(addressType, addressRemote, portRemote, log, parsed
   return socket;
 }
 
-/**
- * Parses SOCKS5 address string.
- * @param {string} address
- * @returns {object}
- */
 function socks5AddressParser(address) {
   try {
     const [authPart, hostPart] = address.includes('@') ? address.split('@') : [null, address];
@@ -890,9 +1633,142 @@ function socks5AddressParser(address) {
   }
 }
 
-/**
- * @returns {string} CSS content of the page.
- */
+function isValidUUID(uuid) {
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  return uuidRegex.test(uuid);
+}
+
+async function handleScamalyticsLookup(request, config) {
+  const url = new URL(request.url);
+  const ipToLookup = url.searchParams.get('ip');
+  if (!ipToLookup) {
+    return new Response(JSON.stringify({ error: 'Missing IP parameter' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const { username, apiKey, baseUrl } = config.scamalytics;
+  if (!username || !apiKey) {
+    return new Response(JSON.stringify({ error: 'Scamalytics API credentials not configured.' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const scamalyticsUrl = `${baseUrl}${username}/?key=${apiKey}&ip=${ipToLookup}`;
+  const headers = new Headers({
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+  });
+
+  try {
+    const scamalyticsResponse = await fetch(scamalyticsUrl);
+    const responseBody = await scamalyticsResponse.json();
+    return new Response(JSON.stringify(responseBody), { headers });
+  } catch (error) {
+    return new Response(JSON.stringify({ error: error.toString() }), {
+      status: 500,
+      headers,
+    });
+  }
+}
+
+function handleConfigPage(userID, hostName, proxyAddress, expDate = '', expTime = '', dataLimit = 0, usedTraffic = 0) {
+  const html = generateBeautifulConfigPage(userID, hostName, proxyAddress, expDate, expTime, dataLimit, usedTraffic);
+  return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+}
+
+function generateBeautifulConfigPage(userID, hostName, proxyAddress, expDate = '', expTime = '', dataLimit = 0, usedTraffic = 0) {
+  const singleXrayConfig = buildLink({
+    core: 'xray', proto: 'tls', userID, hostName,
+    address: hostName, port: 443, tag: `${hostName}-Xray`,
+  });
+
+  const singleSingboxConfig = buildLink({
+    core: 'sb', proto: 'tls', userID, hostName,
+    address: hostName, port: 443, tag: `${hostName}-Singbox`,
+  });
+
+  const subXrayUrl = `https://${hostName}/xray/${userID}`;
+  const subSbUrl = `https://${hostName}/sb/${userID}`;
+
+  const clientUrls = {
+    universalAndroid: `v2rayng://install-config?url=${encodeURIComponent(subXrayUrl)}`,
+    karing: `karing://install-config?url=${encodeURIComponent(subXrayUrl)}`,
+    shadowrocket: `shadowrocket://add/sub?url=${encodeURIComponent(subXrayUrl)}&name=${encodeURIComponent(hostName)}`,
+    stash: `stash://install-config?url=${encodeURIComponent(subXrayUrl)}`,
+    streisand: `streisand://import/${btoa(subXrayUrl)}`,
+    clashMeta: `clash://install-config?url=${encodeURIComponent(`https://revil-sub.pages.dev/sub/clash-meta?url=${subSbUrl}&remote_config=&udp=false&ss_uot=false&show_host=false&forced_ws0rtt=true`)}`,
+  };
+
+  let expirationBlock = '';
+  if (expDate && expTime) {
+      const utcTimestamp = `${expDate}T${expTime.split('.')[0]}Z`;
+      expirationBlock = `
+        <div class="expiration-card">
+          <div class="expiration-card-content">
+            <h2 class="expiration-title">Expiration Date</h2>
+            <div id="expiration-relative" class="expiration-relative-time"></div>
+            <hr class="expiration-divider">
+            <div id="expiration-display" data-utc-time="${utcTimestamp}">Loading expiration time...</div>
+          </div>
+        </div>
+      `;
+  } else {
+      expirationBlock = `
+        <div class="expiration-card">
+          <div class="expiration-card-content">
+            <h2 class="expiration-title">Expiration Date</h2>
+            <hr class="expiration-divider">
+            <div id="expiration-display">No expiration date set.</div>
+          </div>
+        </div>
+      `;
+  }
+
+  let trafficBlock = '';
+  const trafficText = dataLimit === 0 ? `${formatBytes(usedTraffic)} / Unlimited` : `${formatBytes(usedTraffic)} / ${formatBytes(dataLimit)}`;
+  const progressPercent = dataLimit === 0 ? 0 : (usedTraffic / dataLimit) * 100;
+  let progressClass = '';
+  if (progressPercent > 90) progressClass = 'danger';
+  else if (progressPercent > 70) progressClass = 'warning';
+  trafficBlock = `
+    <div class="expiration-card">
+      <div class="expiration-card-content">
+        <h2 class="expiration-title">Data Usage</h2>
+        <hr class="expiration-divider">
+        <div class="progress-bar-container"><div class="progress-bar ${progressClass}" style="width: ${progressPercent}%"></div></div>
+        <div class="traffic-text">${trafficText}</div>
+      </div>
+    </div>
+  `;
+
+  const finalHTML = `<!doctype html>
+  <html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VLESS Proxy Configuration</title>
+    <link rel="icon" href="https://raw.githubusercontent.com/NiREvil/zizifn/refs/heads/Legacy/assets/favicon.png" type="image/png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@300..700&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <style>${getPageCSS()}</style> 
+  </head>
+  <body data-proxy-ip="${proxyAddress}">
+    ${getPageHTML(singleXrayConfig, singleSingboxConfig, clientUrls, subXrayUrl, subSbUrl).replace(
+        '', 
+        expirationBlock + trafficBlock
+    )}
+    <script>${getPageScript()}</script>
+  </body>
+  </html>`;
+
+  return finalHTML;
+}
+
 function getPageCSS() {
   return `
       * {
@@ -901,49 +1777,120 @@ function getPageCSS() {
         box-sizing: border-box;
       }
       @font-face {
-	      font-family: "Aldine 401 BT Web";
-	      src: url("https://pub-7a3b428c76aa411181a0f4dd7fa9064b.r2.dev/Aldine401_Mersedeh.woff2") format("woff2");
-	      font-weight: 400; font-style: normal; font-display: swap;
-	    }
-	    @font-face {
-	      font-family: "Styrene B LC";
-	      src: url("https://pub-7a3b428c76aa411181a0f4dd7fa9064b.r2.dev/StyreneBLC-Regular.woff2") format("woff2");
-	      font-weight: 400; font-style: normal; font-display: swap;
-	    }
-	    @font-face {
-	      font-family: "Styrene B LC";
-	      src: url("https://pub-7a3b428c76aa411181a0f4dd7fa9064b.r2.dev/StyreneBLC-Medium.woff2") format("woff2");
-	      font-weight: 500; font-style: normal; font-display: swap;
-	    }
+      font-family: "Aldine 401 BT Web";
+      src: url("https://pub-7a3b428c76aa411181a0f4dd7fa9064b.r2.dev/Aldine401_Mersedeh.woff2") format("woff2");
+      font-weight: 400; font-style: normal; font-display: swap;
+    }
+    @font-face {
+      font-family: "Styrene B LC";
+      src: url("https://pub-7a3b428c76aa411181a0f4dd7fa9064b.r2.dev/StyreneBLC-Regular.woff2") format("woff2");
+      font-weight: 400; font-style: normal; font-display: swap;
+    }
+    @font-face {
+      font-family: "Styrene B LC";
+      src: url("https://pub-7a3b428c76aa411181a0f4dd7fa9064b.r2.dev/StyreneBLC-Medium.woff2") format("woff2");
+      font-weight: 500; font-style: normal; font-display: swap;
+    }
       :root {
         --background-primary: #2a2421; --background-secondary: #35302c; --background-tertiary: #413b35;
         --border-color: #5a4f45; --border-color-hover: #766a5f; --text-primary: #e5dfd6; --text-secondary: #b3a89d;
         --text-accent: #ffffff; --accent-primary: #be9b7b; --accent-secondary: #d4b595; --accent-tertiary: #8d6e5c;
         --accent-primary-darker: #8a6f56; --button-text-primary: #2a2421; --button-text-secondary: var(--text-primary);
         --shadow-color: rgba(0, 0, 0, 0.35); --shadow-color-accent: rgba(190, 155, 123, 0.4);
-        --border-radius: 8px; --transition-speed: 0.2s; --transition-speed-fast: 0.1s; --transition-speed-medium: 0.3s; --transition-speed-long: 0.6s;
+        --border-radius: 12px; --transition-speed: 0.2s; --transition-speed-fast: 0.1s; --transition-speed-medium: 0.3s; --transition-speed-long: 0.6s;
         --status-success: #70b570; --status-error: #e05d44; --status-warning: #e0bc44; --status-info: #4f90c4;
         --serif: "Aldine 401 BT Web", "Times New Roman", Times, Georgia, ui-serif, serif;
-	      --sans-serif: "Styrene B LC", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, "Noto Color Emoji", sans-serif;
-	      --mono-serif: "Fira Code", Cantarell, "Courier Prime", monospace;
-	    }
+      --sans-serif: "Styrene B LC", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, "Noto Color Emoji", sans-serif;
+      --mono-serif: "Fira Code", Cantarell, "Courier Prime", monospace;
+    }
       body {
         font-family: var(--sans-serif); font-size: 16px; font-weight: 400; font-style: normal;
         background-color: var(--background-primary); color: var(--text-primary);
         padding: 3rem; line-height: 1.5; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
       }
+      
+      @keyframes rgb-animation {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+      .expiration-card {
+        position: relative;
+        padding: 3px;
+        background: var(--background-secondary);
+        border-radius: var(--border-radius);
+        margin-bottom: 24px;
+        overflow: hidden;
+        z-index: 1;
+      }
+      .expiration-card::before {
+        content: '';
+        position: absolute;
+        top: -50%;
+        left: -50%;
+        width: 200%;
+        height: 200%;
+        background: conic-gradient(
+          #ff0000, #ff00ff, #0000ff, #00ffff, #00ff00, #ffff00, #ff0000
+        );
+        animation: rgb-animation 4s linear infinite;
+        z-index: -1;
+      }
+      .expiration-card-content {
+        background: var(--background-secondary);
+        padding: 20px;
+        border-radius: calc(var(--border-radius) - 3px);
+      }
+      .expiration-title {
+        font-family: var(--serif);
+        font-size: 1.6rem;
+        font-weight: 400;
+        text-align: center;
+        color: var(--accent-secondary);
+        margin: 0 0 12px 0;
+      }
+      .expiration-relative-time {
+        text-align: center;
+        font-size: 1.1rem;
+        font-weight: 500;
+        margin-bottom: 12px;
+        padding: 4px 8px;
+        border-radius: 6px;
+      }
+      .expiration-relative-time.active {
+        color: var(--status-success);
+        background-color: rgba(112, 181, 112, 0.1);
+      }
+      .expiration-relative-time.expired {
+        color: var(--status-error);
+        background-color: rgba(224, 93, 68, 0.1);
+      }
+      .expiration-divider {
+        border: 0;
+        height: 1px;
+        background: var(--border-color);
+        margin: 0 auto 16px;
+        width: 80%;
+      }
+      #expiration-display { font-size: 0.9em; text-align: center; color: var(--text-secondary); }
+      #expiration-display span { display: block; margin-top: 8px; font-size: 0.9em; line-height: 1.6; }
+      #expiration-display strong { color: var(--text-primary); font-weight: 500; }
+      .progress-bar-container { width: 100%; background-color: #4B5563; border-radius: 4px; height: 8px; overflow: hidden; margin-top: 4px; }
+      .progress-bar { height: 100%; background-color: #22C55E; transition: width 0.3s ease; }
+      .progress-bar.warning { background-color: #F59E0B; }
+      .progress-bar.danger { background-color: #EF4444; }
+      .traffic-text { font-size: 12px; color: var(--text-secondary); margin-top: 4px; text-align: center; }
+
       .container {
         max-width: 800px; margin: 20px auto; padding: 0 12px; border-radius: var(--border-radius);
         box-shadow: 0 6px 15px rgba(0, 0, 0, 0.2), 0 0 25px 8px var(--shadow-color-accent);
         transition: box-shadow var(--transition-speed-medium) ease;
       }
       .container:hover { box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25), 0 0 35px 10px var(--shadow-color-accent); }
-      .header { text-align: center; margin-bottom: 40px; padding-top: 30px; }
+      .header { text-align: center; margin-bottom: 30px; padding-top: 30px; }
       .header h1 { font-family: var(--serif); font-weight: 400; font-size: 1.8rem; color: var(--text-accent); margin-top: 0px; margin-bottom: 2px; }
       .header p { color: var(--text-secondary); font-size: 0.6rem; font-weight: 400; }
       .config-card {
-        background: var(--background-secondary); border-radius: var(--border-radius); padding: 20px; margin-bottom: 24px;
-        border: 1px solid var(--border-color);
+        background: var(--background-secondary); border-radius: var(--border-radius); padding: 20px; margin-bottom: 24px; border: 1px solid var(--border-color);
         transition: border-color var(--transition-speed) ease, box-shadow var(--transition-speed) ease;
       }
       .config-card:hover { border-color: var(--border-color-hover); box-shadow: 0 4px 8px var(--shadow-color); }
@@ -1007,7 +1954,9 @@ function getPageCSS() {
       }
       .copy-buttons:active { transform: translateY(0px) scale(0.98); box-shadow: none; }
       .copy-icon { width: 12px; height: 12px; stroke: currentColor; }
-      .client-buttons { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; margin-top: 16px; }
+      .client-buttons-container { display: flex; flex-direction: column; gap: 16px; margin-top: 16px; }
+      .client-buttons-container h3 { font-family: var(--serif); font-size: 14px; color: var(--text-secondary); margin: 8px 0 -8px 0; font-weight: 400; text-align: center; }
+      .client-buttons { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
       .client-btn {
         width: 100%; background-color: var(--accent-primary); color: var(--background-tertiary);
         border-radius: 6px; border-color: var(--accent-primary-darker); position: relative; overflow: hidden;
@@ -1029,76 +1978,74 @@ function getPageCSS() {
       .client-btn:hover .client-icon { transform: rotate(15deg) scale(1.1); }
       .client-btn .button-text { position: relative; z-index: 2; transition: letter-spacing 0.3s ease; }
       .client-btn:hover .button-text { letter-spacing: 0.5px; }
-	    .client-icon { width: 18px; height: 18px; border-radius: 6px; background-color: var(--background-secondary); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-	    .client-icon svg { width: 14px; height: 14px; fill: var(--accent-secondary); }
-	    .button.copied { background-color: var(--accent-secondary) !important; color: var(--background-tertiary) !important; }
-	    .button.error { background-color: #c74a3b !important; color: var(--text-accent) !important; }
-	    .footer { text-align: center; margin-top: 20px; padding-bottom: 40px; color: var(--text-secondary); font-size: 8px; }
-	    .footer p { margin-bottom: 0px; }
-	    ::-webkit-scrollbar { width: 8px; height: 8px; }
-	    ::-webkit-scrollbar-track { background: var(--background-primary); border-radius: 4px; }
-	    ::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 4px; border: 2px solid var(--background-primary); }
-	    ::-webkit-scrollbar-thumb:hover { background: var(--border-color-hover); }
-	    * { scrollbar-width: thin; scrollbar-color: var(--border-color) var(--background-primary); }
-	    .ip-info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 24px; }
-	    .ip-info-section { background-color: var(--background-tertiary); border-radius: var(--border-radius); padding: 16px; border: 1px solid var(--border-color); display: flex; flex-direction: column; gap: 20px; }
-	    .ip-info-header { display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border-color); padding-bottom: 10px; }
-	    .ip-info-header svg { width: 20px; height: 20px; stroke: var(--accent-secondary); }
-	    .ip-info-header h3 { font-family: var(--serif); font-size: 18px; font-weight: 400; color: var(--accent-secondary); margin: 0; }
-	    .ip-info-content { display: flex; flex-direction: column; gap: 10px; }
-	    .ip-info-item { display: flex; flex-direction: column; gap: 2px; }
-	    .ip-info-item .label { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
-	    .ip-info-item .value { font-size: 14px; color: var(--text-primary); word-break: break-all; line-height: 1.4; }
-	    .badge { display: inline-flex; align-items: center; justify-content: center; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
-	    .badge-yes { background-color: rgba(112, 181, 112, 0.15); color: var(--status-success); border: 1px solid rgba(112, 181, 112, 0.3); }
-	    .badge-no { background-color: rgba(224, 93, 68, 0.15); color: var(--status-error); border: 1px solid rgba(224, 93, 68, 0.3); }
-	    .badge-neutral { background-color: rgba(79, 144, 196, 0.15); color: var(--status-info); border: 1px solid rgba(79, 144, 196, 0.3); }
-	    .badge-warning { background-color: rgba(224, 188, 68, 0.15); color: var(--status-warning); border: 1px solid rgba(224, 188, 68, 0.3); }
-	    .skeleton { display: block; background: linear-gradient(90deg, var(--background-tertiary) 25%, var(--background-secondary) 50%, var(--background-tertiary) 75%); background-size: 200% 100%; animation: loading 1.5s infinite; border-radius: 4px; height: 16px; }
-	    @keyframes loading { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-	    .country-flag { display: inline-block; width: 18px; height: auto; max-height: 14px; margin-right: 6px; vertical-align: middle; border-radius: 2px; }
-	    @media (max-width: 768px) {
-	      body { padding: 20px; } .container { padding: 0 14px; width: min(100%, 768px); }
-	      .ip-info-grid { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 18px; }
-	      .header h1 { font-size: 1.8rem; } .header p { font-size: 0.7rem }
-	      .ip-info-section { padding: 14px; gap: 18px; } .ip-info-header h3 { font-size: 16px; }
-	      .ip-info-header { gap: 8px; } .ip-info-content { gap: 8px; }
-	      .ip-info-item .label { font-size: 11px; } .ip-info-item .value { font-size: 13px; }
-	      .config-card { padding: 16px; } .config-title { font-size: 18px; }
-	      .config-title .refresh-btn { font-size: 11px; } .config-content pre { font-size: 12px; }
-	      .client-buttons { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
-	      .button { font-size: 12px; } .copy-buttons { font-size: 11px; }
-	    }
-	    @media (max-width: 480px) {
-	      body { padding: 16px; } .container { padding: 0 12px; width: min(100%, 390px); }
-	      .header h1 { font-size: 20px; } .header p { font-size: 8px; }
-	      .ip-info-section { padding: 14px; gap: 16px; }
-	      .ip-info-grid { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
-	      .ip-info-header h3 { font-size: 14px; } .ip-info-header { gap: 6px; }
-	      .ip-info-content { gap: 6px; } .ip-info-header svg { width: 18px; height: 18px; }
-	      .ip-info-item .label { font-size: 9px; } .ip-info-item .value { font-size: 11px; }
-	      .badge { padding: 2px 6px; font-size: 10px; border-radius: 10px; }
-	      .config-card { padding: 10px; } .config-title { font-size: 16px; }
-	      .config-title .refresh-btn { font-size: 10px; } .config-content { padding: 12px; }
-	      .config-content pre { font-size: 10px; }
-	      .client-buttons { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
-	      .button { padding: 4px 8px; font-size: 11px; } .copy-buttons { font-size: 10px; }
-	      .footer { font-size: 10px; }
-	    }
-	    @media (max-width: 359px) {
+    .client-icon { width: 18px; height: 18px; border-radius: 6px; background-color: var(--background-secondary); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .client-icon svg { width: 14px; height: 14px; fill: var(--accent-secondary); }
+    .button.copied { background-color: var(--accent-secondary) !important; color: var(--background-tertiary) !important; }
+    .button.error { background-color: #c74a3b !important; color: var(--text-accent) !important; }
+    .footer { text-align: center; margin-top: 20px; margin-bottom: 40px; color: var(--text-secondary); font-size: 8px; }
+    .footer p { margin-bottom: 0px; }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: var(--background-primary); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 4px; border: 2px solid var(--background-primary); }
+    ::-webkit-scrollbar-thumb:hover { background: var(--border-color-hover); }
+    * { scrollbar-width: thin; scrollbar-color: var(--border-color) var(--background-primary); }
+    .ip-info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 24px; }
+    .ip-info-section { background-color: var(--background-tertiary); border-radius: var(--border-radius); padding: 16px; border: 1px solid var(--border-color); display: flex; flex-direction: column; gap: 20px; }
+    .ip-info-header { display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border-color); padding-bottom: 10px; }
+    .ip-info-header svg { width: 20px; height: 20px; stroke: var(--accent-secondary); }
+    .ip-info-header h3 { font-family: var(--serif); font-size: 18px; font-weight: 400; color: var(--accent-secondary); margin: 0; }
+    .ip-info-content { display: flex; flex-direction: column; gap: 10px; }
+    .ip-info-item { display: flex; flex-direction: column; gap: 2px; }
+    .ip-info-item .label { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
+    .ip-info-item .value { font-size: 14px; color: var(--text-primary); word-break: break-all; line-height: 1.4; }
+    .badge { display: inline-flex; align-items: center; justify-content: center; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
+    .badge-yes { background-color: rgba(112, 181, 112, 0.15); color: var(--status-success); border: 1px solid rgba(112, 181, 112, 0.3); }
+    .badge-no { background-color: rgba(224, 93, 68, 0.15); color: var(--status-error); border: 1px solid rgba(224, 93, 68, 0.3); }
+    .badge-neutral { background-color: rgba(79, 144, 196, 0.15); color: var(--status-info); border: 1px solid rgba(79, 144, 196, 0.3); }
+    .badge-warning { background-color: rgba(224, 188, 68, 0.15); color: var(--status-warning); border: 1px solid rgba(224, 188, 68, 0.3); }
+    .skeleton { display: block; background: linear-gradient(90deg, var(--background-tertiary) 25%, var(--background-secondary) 50%, var(--background-tertiary) 75%); background-size: 200% 100%; animation: loading 1.5s infinite; border-radius: 4px; height: 16px; }
+    @keyframes loading { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+    .country-flag { display: inline-block; width: 18px; height: auto; max-height: 14px; margin-right: 6px; vertical-align: middle; border-radius: 2px; }
+    @media (max-width: 768px) {
+      body { padding: 20px; } .container { padding: 0 14px; width: min(100%, 768px); }
+      .ip-info-grid { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 18px; }
+      .header h1 { font-size: 1.8rem; } .header p { font-size: 0.7rem }
+      .ip-info-section { padding: 14px; gap: 18px; } .ip-info-header h3 { font-size: 16px; }
+      .ip-info-header { gap: 8px; } .ip-info-content { gap: 8px; }
+      .ip-info-item .label { font-size: 11px; } .ip-info-item .value { font-size: 13px; }
+      .config-card { padding: 16px; } .config-title { font-size: 18px; }
+      .config-title .refresh-btn { font-size: 11px; } .config-content pre { font-size: 12px; }
+      .client-buttons { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+      .button { font-size: 12px; } .copy-buttons { font-size: 11px; }
+    }
+    @media (max-width: 480px) {
+      body { padding: 16px; } .container { padding: 0 12px; width: min(100%, 390px); }
+      .header h1 { font-size: 20px; } .header p { font-size: 8px; }
+      .ip-info-section { padding: 14px; gap: 16px; }
+      .ip-info-grid { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
+      .ip-info-header h3 { font-size: 14px; } .ip-info-header { gap: 6px; } .ip-info-content { gap: 6px; }
+      .ip-info-header svg { width: 18px; height: 18px; } .ip-info-item .label { font-size: 9px; }
+      .ip-info-item .value { font-size: 11px; } .badge { padding: 2px 6px; font-size: 10px; border-radius: 10px; }
+      .config-card { padding: 10px; } .config-title { font-size: 16px; }
+      .config-title .refresh-btn { font-size: 10px; } .config-content { padding: 12px; }
+      .config-content pre { font-size: 10px; }
+      .client-buttons { grid-template-columns: repeat(auto-fill, minmax(100%, 1fr)); }
+      .button { padding: 4px 8px; font-size: 11px; } .copy-buttons { font-size: 10px; } .footer { font-size: 10px; }
+      }
+    @media (max-width: 359px) {
           body { padding: 12px; font-size: 14px; } .container { max-width: 100%; padding: 8px; }
           .header h1 { font-size: 16px; } .header p { font-size: 6px; }
           .ip-info-section { padding: 12px; gap: 12px; }
           .ip-info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
           .ip-info-header h3 { font-size: 13px; } .ip-info-header { gap: 4px; } .ip-info-content { gap: 4px; }
           .ip-info-header svg { width: 16px; height: 16px; } .ip-info-item .label { font-size: 8px; }
-		  .ip-info-item .value { font-size: 10px; } .badge { padding: 1px 4px; font-size: 9px; border-radius: 8px; }
+  .ip-info-item .value { font-size: 10px; } .badge { padding: 1px 4px; font-size: 9px; border-radius: 8px; }
           .config-card { padding: 8px; } .config-title { font-size: 13px; } .config-title .refresh-btn { font-size: 9px; }
           .config-content { padding: 8px; } .config-content pre { font-size: 8px; }
-		  .client-buttons { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  .client-buttons { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
           .button { padding: 3px 6px; font-size: 10px; } .copy-buttons { font-size: 9px; } .footer { font-size: 7px; }
         }
-    
+     
         @media (min-width: 360px) { .container { max-width: 95%; } }
         @media (min-width: 480px) { .container { max-width: 90%; } }
         @media (min-width: 640px) { .container { max-width: 600px; } }
@@ -1107,12 +2054,7 @@ function getPageCSS() {
   `;
 }
 
-/**
- * @param {object} configs - Object containing configuration links.
- * @param {object} clientUrls - Object containing client URLs.
- * @returns {string} The HTML body content of the page.
- */
-function getPageHTML(configs, clientUrls) {
+function getPageHTML(singleXrayConfig, singleSingboxConfig, clientUrls, subXrayUrl, subSbUrl) {
   return `
     <div class="container">
       <div class="header">
@@ -1165,43 +2107,76 @@ function getPageHTML(configs, clientUrls) {
 
       <div class="config-card">
         <div class="config-title">
-          <span>Xray Core Clients</span>
-          <button class="button copy-buttons" onclick="copyToClipboard(this, '${configs.dream}')">
-            <svg class="copy-icon" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-            Copy
+          <span>Xray Subscription</span>
+          <button id="copy-xray-sub-btn" class="button copy-buttons" data-clipboard-text="${subXrayUrl}">
+             <svg class="copy-icon" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+             Copy Link
           </button>
         </div>
-        <div class="config-content"><pre id="xray-config">${configs.dream}</pre></div>
-        <div class="client-buttons">
-          <a href="${clientUrls.hiddify}" class="button client-btn">
-            <span class="client-icon"><svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" /></svg></span>
-            <span class="button-text">Import to Hiddify</span>
-          </a>
-          <a href="${clientUrls.v2rayng}" class="button client-btn">
-            <span class="client-icon"><svg viewBox="0 0 24 24"><path d="M12 2L4 5v6c0 5.5 3.5 10.7 8 12.3 4.5-1.6 8-6.8 8-12.3V5l-8-3z" /></svg></span>
-            <span class="button-text">Import to V2rayNG</span>
-          </a>
+        <div class="config-content" style="display:none;"><pre id="xray-config">${singleXrayConfig}</pre></div>
+        <div class="client-buttons-container">
+            <h3>Android</h3>
+            <div class="client-buttons">
+                <a href="${clientUrls.universalAndroid}" class="button client-btn">
+                    <span class="client-icon"><svg viewBox="0 0 24 24"><path d="M4.3,17.4 L19.7,17.4 L19.7,6.6 L4.3,6.6 L4.3,17.4 Z M3,4 L21,4 C22.1,4 23,4.9 23,6 L23,18 C23,19.1 22.1,20 21,20 L3,20 C1.9,20 1,19.1 1,18 L1,6 C1,4.9 1.9,4 3,4 L3,4 Z"/></svg></span>
+                    <span class="button-text">Universal Import (V2rayNG, etc.)</span>
+                </a>
+                 <a href="${clientUrls.karing}" class="button client-btn">
+                    <span class="client-icon"><svg viewBox="0 0 24 24"><path d="M12 2L4 5v6c0 5.5 3.5 10.7 8 12.3 4.5-1.6 8-6.8 8-12.3V5l-8-3z" /></svg></span>
+                    <span class="button-text">Import to Karing</span>
+                </a>
+            </div>
+            <h3>iOS</h3>
+            <div class="client-buttons">
+                <a href="${clientUrls.shadowrocket}" class="button client-btn">
+                    <span class="client-icon"><svg viewBox="0 0 24 24"><path d="M12,2 C6.48,2 2,6.48 2,12 C2,17.52 6.48,22 12,22 C17.52,22 22,17.52 22,12 C22,6.48 17.52,2 12,2 Z M16.29,15.71 L12,11.41 L7.71,15.71 L6.29,14.29 L10.59,10 L6.29,5.71 L7.71,4.29 L12,8.59 L16.29,4.29 L17.71,5.71 L13.41,10 L17.71,14.29 L16.29,15.71 Z"/></svg></span>
+                    <span class="button-text">Import to Shadowrocket</span>
+                </a>
+                <a href="${clientUrls.stash}" class="button client-btn">
+                    <span class="client-icon"><svg viewBox="0 0 24 24"><path d="M12,2 L2,7 L12,12 L22,7 L12,2 Z M2,17 L12,22 L22,17 L12,12 L2,17 Z M2,12 L12,17 L22,12 L12,7 L2,12 Z"/></svg></span>
+                    <span class="button-text">Import to Stash</span>
+                </a>
+                <a href="${clientUrls.streisand}" class="button client-btn">
+                    <span class="client-icon"><svg viewBox="0 0 24 24"><path d="M19,3 H5 C3.9,3 3,3.9 3,5 v14 c0,1.1 0.9,2 2,2 h14 c1.1,0 2-0.9 2-2 V5 C21,3.9 20.1,3 19,3 Z M12,11.5 c-0.83,0 -1.5,-0.67 -1.5,-1.5 s0.67,-1.5 1.5,-1.5 s1.5,0.67 1.5,1.5 S12.83,11.5 12,11.5 Z"/></svg></span>
+                    <span class="button-text">Import to Streisand</span>
+                </a>
+            </div>
+            <h3>Desktop / Other</h3>
+            <div class="client-buttons">
+              <button class="button client-btn" onclick="toggleQR('xray', '${subXrayUrl}')">
+                <span class="client-icon"><svg viewBox="0 0 24 24"><path d="M4 4h6v6H4zm0 10h6v6H4zm10-10h6v6h-6zm0 10h6v6h-6zm-4-3h2v2h-2zm0-4h2v2h-2zm-4 0h2v2H6zm-2-2h2v2H4zm12 0h2v2h-2zM9 6h2v2H9zm4 0h2v2h-2zm2 5h2v2h-2zM9 13h2v2H9zm-2 2h2v2H7zm-2-2h2v2H5z"/></svg></span>
+                <span class="button-text">Show QR Code</span>
+              </button>
+            </div>
+            <div id="qr-xray-container" style="display:none; text-align:center; margin-top: 10px; background: white; padding: 10px; border-radius: 8px; max-width: 276px; margin-left: auto; margin-right: auto;"><div id="qr-xray"></div></div>
         </div>
       </div>
 
       <div class="config-card">
         <div class="config-title">
-          <span>Sing-Box Core Clients</span>
-          <button class="button copy-buttons" onclick="copyToClipboard(this, '${configs.freedom}')">
+          <span>Sing-Box / Clash Subscription</span>
+          <button id="copy-sb-sub-btn" class="button copy-buttons" data-clipboard-text="${subSbUrl}">
             <svg class="copy-icon" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-            Copy
+            Copy Link
           </button>
         </div>
-        <div class="config-content"><pre id="singbox-config">${configs.freedom}</pre></div>
-        <div class="client-buttons">
-          <a href="${clientUrls.clashMeta}" class="button client-btn">
-            <span class="client-icon"><svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z" /></svg></span>
-            <span class="button-text">Import to Clash Meta</span>
-          </a>
-          <a href="${clientUrls.exclave}" class="button client-btn">
-            <span class="client-icon"><svg viewBox="0 0 24 24"><path d="M20,8h-3V6c0-1.1-0.9-2-2-2H9C7.9,4,7,4.9,7,6v2H4C2.9,8,2,8.9,2,10v9c0,1.1,0.9,2,2,2h16c1.1,0,2-0.9,2-2v-9 C22,8.9,21.1,8,20,8z M9,6h6v2H9V6z M20,19H4v-2h16V19z M20,15H4v-5h3v1c0,0.55,0.45,1,1,1h1.5c0.28,0,0.5-0.22,0.5-0.5v-0.5h4v0.5 c0,0.28,0.22,0.5,0.5,0.5H16c0.55,0,1-0.45,1-1v-1h3V15z" /><circle cx="8.5" cy="13.5" r="1" /><circle cx="15.5" cy="13.5" r="1" /><path d="M12,15.5c-0.55,0-1-0.45-1-1h2C13,15.05,12.55,15.5,12,15.5z" /></svg></span>
-            <span class="button-text">Import to Exclavex</span>
-          </a>
+        <div class="config-content" style="display:none;"><pre id="singbox-config">${singleSingboxConfig}</pre></div>
+        <div class="client-buttons-container">
+            <h3>Android / Windows / macOS</h3>
+            <div class="client-buttons">
+                <a href="${clientUrls.clashMeta}" class="button client-btn">
+                  <span class="client-icon"><svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z" /></svg></span>
+                  <span class="button-text">Import to Clash Meta / Stash</span>
+                </a>
+            </div>
+            <h3>Desktop / Other</h3>
+             <div class="client-buttons">
+              <button class="button client-btn" onclick="toggleQR('singbox', '${subSbUrl}')">
+                <span class="client-icon"><svg viewBox="0 0 24 24"><path d="M4 4h6v6H4zm0 10h6v6H4zm10-10h6v6h-6zm0 10h6v6h-6zm-4-3h2v2h-2zm0-4h2v2h-2zm-4 0h2v2H6zm-2-2h2v2H4zm12 0h2v2h-2zM9 6h2v2H9zm4 0h2v2h-2zm2 5h2v2h-2zM9 13h2v2H9zm-2 2h2v2H7zm-2-2h2v2H5z"/></svg></span>
+                <span class="button-text">Show QR Code</span>
+              </button>
+            </div>
+            <div id="qr-singbox-container" style="display:none; text-align:center; margin-top: 10px; background: white; padding: 10px; border-radius: 8px; max-width: 276px; margin-left: auto; margin-right: auto;"><div id="qr-singbox"></div></div>
         </div>
       </div>
 
@@ -1213,17 +2188,21 @@ function getPageHTML(configs, clientUrls) {
   `;
 }
 
-/**
- * @returns {string} Client-side JavaScript
- * This function is self-contained and doesn't need template literals from the server.
- * Using a template literal here is just for multi-line string formatting.
- */
+function formatBytes(bytes, decimals = 2) {
+  if (bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+}
+
 function getPageScript() {
   return `
       function copyToClipboard(button, text) {
         const originalHTML = button.innerHTML;
         navigator.clipboard.writeText(text).then(() => {
-          button.innerHTML = \`<svg class="copy-icon" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg> Copied!\`;
+          button.innerHTML = \`<svg class="copy-icon" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg> Copied!\`;
           button.classList.add("copied");
           button.disabled = true;
           setTimeout(() => {
@@ -1234,6 +2213,32 @@ function getPageScript() {
         }).catch(err => {
           console.error("Failed to copy text: ", err);
         });
+      }
+
+      function toggleQR(id, url) {
+        var container = document.getElementById('qr-' + id + '-container');
+        if (container.style.display === 'none' || container.style.display === '') {
+            container.style.display = 'block';
+            if (!url) {
+                console.error("Subscription URL for QR code is missing.");
+                container.innerHTML = "<p style='color:red; padding: 10px;'>Error: Subscription URL not provided.</p>";
+                return;
+            }
+            var qrElement = document.getElementById('qr-' + id);
+            qrElement.innerHTML = ''; 
+            if (!qrElement.hasChildNodes()) {
+                new QRCode(qrElement, {
+                    text: url,
+                    width: 256,
+                    height: 256,
+                    colorDark: "#2a2421",
+                    colorLight: "#e5dfd6",
+                    correctLevel: QRCode.CorrectLevel.H
+                });
+            }
+        } else {
+            container.style.display = 'none';
+        }
       }
 
       async function fetchClientPublicIP() {
@@ -1268,7 +2273,7 @@ function getPageScript() {
 
       function updateScamalyticsClientDisplay(data) {
         const prefix = 'client';
-        if (!data || !data.scamalytics || data.scamalytics.status !== 'ok') {
+        if (!data  || !data.scamalytics  || data.scamalytics.status !== 'ok') {
           showError(prefix, (data && data.scamalytics && data.scamalytics.error) || 'Could not load client data from Scamalytics');
           return;
         }
@@ -1289,7 +2294,7 @@ function getPageScript() {
           if (flagElementHtml || textPart) locationString = \`\${flagElementHtml}\${textPart}\`.trim();
           elements.location.innerHTML = locationString || "N/A";
         }
-        if (elements.isp) elements.isp.textContent = sa.scamalytics_isp || dbip?.isp_name || "N/A";
+        if (elements.isp) elements.isp.textContent = sa.scamalytics_isp  || dbip?.isp_name  || "N/A";
         if (elements.proxy) {
           const score = sa.scamalytics_score;
           const risk = sa.scamalytics_risk;
@@ -1327,7 +2332,7 @@ function getPageScript() {
           let textPart = [city, countryName].filter(Boolean).join(', ');
           elements.location.innerHTML = (flagElementHtml || textPart) ? \`\${flagElementHtml}\${textPart}\`.trim() : "N/A";
         }
-        if (elements.isp) elements.isp.textContent = geo.isp || geo.organisation || geo.as_name || geo.as || 'N/A';
+        if (elements.isp) elements.isp.textContent = geo.isp  || geo.organisation  || geo.as_name  || geo.as  || 'N/A';
       }
 
       async function fetchIpApiIoInfo(ip) {
@@ -1346,7 +2351,7 @@ function getPageScript() {
         const elements = (prefix === 'proxy') 
           ? ['host', 'ip', 'location', 'isp']
           : ['ip', 'location', 'isp', 'proxy'];
-        
+         
         elements.forEach(key => {
           const el = document.getElementById(\`\${prefix}-\${key}\`);
           if (!el) return;
@@ -1366,7 +2371,7 @@ function getPageScript() {
 
           if (proxyDomainOrIp && proxyDomainOrIp !== "N/A") {
             let resolvedProxyIp = proxyDomainOrIp;
-            if (!/^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$/.test(proxyDomainOrIp)) {
+            if (!/^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$/.test(proxyDomainOrIp) && !/^[0-9a-fA-F:]+$/.test(proxyDomainOrIp)) {
               try {
                 const dnsRes = await fetch(\`https://dns.google/resolve?name=\${encodeURIComponent(proxyDomainOrIp)}&type=A\`);
                 if (dnsRes.ok) {
@@ -1398,35 +2403,104 @@ function getPageScript() {
         }
       }
 
-      document.getElementById('refresh-ip-info')?.addEventListener('click', function() {
-        const button = this;
-        const icon = button.querySelector('.refresh-icon');
-        button.disabled = true;
-        if (icon) icon.style.animation = 'spin 1s linear infinite';
+      function displayExpirationTimes() {
+        const expElement = document.getElementById('expiration-display');
+        const relativeElement = document.getElementById('expiration-relative');
 
-        const resetToSkeleton = (prefix) => {
-          const elementsToReset = ['ip', 'location', 'isp'];
-          if (prefix === 'proxy') elementsToReset.push('host');
-          if (prefix === 'client') elementsToReset.push('proxy');
-          elementsToReset.forEach(key => {
-            const element = document.getElementById(\`\${prefix}-\${key}\`);
-            if (element) element.innerHTML = \`<span class="skeleton" style="width: 120px;"></span>\`;
-          });
+        if (!expElement || !expElement.dataset.utcTime) {
+            if (expElement) expElement.textContent = 'Expiration time not available.';
+            if (relativeElement) relativeElement.style.display = 'none';
+            return;
+        }
+
+        const utcDate = new Date(expElement.dataset.utcTime);
+        if (isNaN(utcDate.getTime())) {
+            expElement.textContent = 'Invalid expiration time format.';
+            if (relativeElement) relativeElement.style.display = 'none';
+            return;
+        }
+         
+        // --- START: Relative Time Calculation ---
+        const now = new Date();
+        const diffSeconds = (utcDate.getTime() - now.getTime()) / 1000;
+        const isExpired = diffSeconds < 0;
+
+        const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
+        let relativeTimeStr = '';
+
+        if (Math.abs(diffSeconds) < 60) {
+            relativeTimeStr = rtf.format(Math.round(diffSeconds), 'second');
+        } else if (Math.abs(diffSeconds) < 3600) {
+            relativeTimeStr = rtf.format(Math.round(diffSeconds / 60), 'minute');
+        } else if (Math.abs(diffSeconds) < 86400) {
+            relativeTimeStr = rtf.format(Math.round(diffSeconds / 3600), 'hour');
+        } else {
+            relativeTimeStr = rtf.format(Math.round(diffSeconds / 86400), 'day');
+        }
+
+        if (relativeElement) {
+            relativeElement.textContent = isExpired ? \`Expired \${relativeTimeStr}\` : \`Expires \${relativeTimeStr}\`;
+            relativeElement.classList.add(isExpired ? 'expired' : 'active');
+        }
+        // --- END: Relative Time Calculation ---
+
+        const commonOptions = {
+            year: 'numeric', month: 'long', day: 'numeric',
+            hour: '2-digit', minute: '2-digit', second: '2-digit',
+            hour12: true, timeZoneName: 'short'
         };
 
-        resetToSkeleton('proxy');
-        resetToSkeleton('client');
-        loadNetworkInfo().finally(() => setTimeout(() => {
-          button.disabled = false; if (icon) icon.style.animation = '';
-        }, 1000));
+        const localTimeStr = utcDate.toLocaleString(undefined, commonOptions);
+        const tehranTimeStr = utcDate.toLocaleString('en-US', { ...commonOptions, timeZone: 'Asia/Tehran' });
+        const utcTimeStr = utcDate.toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+
+        expElement.innerHTML = \`
+          <span><strong>Your Local Time:</strong> \${localTimeStr}</span>
+          <span><strong>Tehran Time:</strong> \${tehranTimeStr}</span>
+          <span><strong>Universal Time:</strong> \${utcTimeStr}</span>
+        \`;
+      }
+
+      document.addEventListener('DOMContentLoaded', () => {
+        loadNetworkInfo();
+        displayExpirationTimes();
+
+        document.querySelectorAll('.copy-buttons').forEach(button => {
+          button.addEventListener('click', function(e) {
+            e.preventDefault();
+            const textToCopy = this.getAttribute('data-clipboard-text');
+            if (textToCopy) {
+              copyToClipboard(this, textToCopy);
+            }
+          });
+        });
+        
+        document.getElementById('refresh-ip-info')?.addEventListener('click', function() {
+            const button = this;
+            const icon = button.querySelector('.refresh-icon');
+            button.disabled = true;
+            if (icon) icon.style.animation = 'spin 1s linear infinite';
+    
+            const resetToSkeleton = (prefix) => {
+              const elementsToReset = ['ip', 'location', 'isp'];
+              if (prefix === 'proxy') elementsToReset.push('host');
+              if (prefix === 'client') elementsToReset.push('proxy');
+              elementsToReset.forEach(key => {
+                const element = document.getElementById(\`\${prefix}-\${key}\`);
+                if (element) element.innerHTML = \`<span class="skeleton" style="width: 120px;"></span>\`;
+              });
+            };
+    
+            resetToSkeleton('proxy');
+            resetToSkeleton('client');
+            loadNetworkInfo().finally(() => setTimeout(() => {
+              button.disabled = false; if (icon) icon.style.animation = '';
+            }, 1000));
+        });
       });
 
       const style = document.createElement('style');
       style.textContent = \`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }\`;
       document.head.appendChild(style);
-
-      document.addEventListener('DOMContentLoaded', () => {
-        loadNetworkInfo();
-      });
   `;
 }
