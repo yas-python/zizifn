@@ -363,17 +363,10 @@ const adminPanelHTML = `<!DOCTYPE html>
                 return response.status === 204 ? null : response.json();
             }
 
-            function isValidUUID(uuid) {
-                const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-                return uuidRegex.test(uuid);
-            }
-
             const pad = (num) => num.toString().padStart(2, '0');
 
             function localToUTC(dateStr, timeStr) {
                 if (!dateStr || !timeStr) return { utcDate: '', utcTime: '' };
-                // Ensure time has seconds if missing
-                if (timeStr.length === 5) timeStr += ':00';
                 const localDateTime = new Date(\`\${dateStr}T\${timeStr}\`);
                 if (isNaN(localDateTime)) return { utcDate: '', utcTime: '' };
 
@@ -617,40 +610,29 @@ const adminPanelHTML = `<!DOCTYPE html>
 
             async function handleCreateUser(e) {
                 e.preventDefault();
-                const uuid = uuidInput.value.trim();
-                if (!uuid || !isValidUUID(uuid)) {
-                    showToast('Please generate or enter a valid UUID.', true);
-                    return;
-                }
                 const localDate = document.getElementById('expiryDate').value;
                 const localTime = document.getElementById('expiryTime').value;
 
                 const { utcDate, utcTime } = localToUTC(localDate, localTime);
-                if (!utcDate || !utcTime) {
-                    showToast('Invalid date or time entered. Please check your inputs.', true);
-                    return;
-                }
+                if (!utcDate || !utcTime) return showToast('Invalid date or time entered.', true);
 
                 const userData = {
-                    uuid: uuid,
+                    uuid: uuidInput.value,
                     exp_date: utcDate,
                     exp_time: utcTime,
                     data_limit: getDataLimitFromInputs(),
-                    notes: document.getElementById('notes').value.trim()
+                    notes: document.getElementById('notes').value
                 };
 
                 try {
                     await api.post('/users', userData);
                     showToast('User created successfully!');
                     createUserForm.reset();
-                    uuidInput.value = generateUUID(); // Use generateUUID function
+                    uuidInput.value = crypto.randomUUID();
                     setDefaultExpiry();
                     await fetchAndRenderUsers();
                     await fetchAndRenderStats();
-                } catch (error) {
-                    console.error('Create user error:', error);
-                    showToast(error.message || 'Failed to create user. Please try again.', true);
-                }
+                } catch (error) { showToast(error.message, true); }
             }
 
             async function handleDeleteUser(uuid) {
@@ -696,38 +678,27 @@ const adminPanelHTML = `<!DOCTYPE html>
 
             async function handleEditUser(e) {
                 e.preventDefault();
-                const uuid = document.getElementById('editUuid').value;
-                if (!uuid || !isValidUUID(uuid)) {
-                    showToast('Invalid UUID for edit.', true);
-                    return;
-                }
                 const localDate = document.getElementById('editExpiryDate').value;
                 const localTime = document.getElementById('editExpiryTime').value;
 
                 const { utcDate, utcTime } = localToUTC(localDate, localTime);
-                if (!utcDate || !utcTime) {
-                    showToast('Invalid date or time entered. Please check your inputs.', true);
-                    return;
-                }
+                if (!utcDate || !utcTime) return showToast('Invalid date or time entered.', true);
 
                 const updatedData = {
                     exp_date: utcDate,
                     exp_time: utcTime,
                     data_limit: getDataLimitFromInputs(true),
-                    notes: document.getElementById('editNotes').value.trim(),
+                    notes: document.getElementById('editNotes').value,
                     reset_traffic: document.getElementById('resetTraffic').checked
                 };
 
                 try {
-                    await api.put(\`/users/\${uuid}\`, updatedData);
+                    await api.put(\`/users/\${document.getElementById('editUuid').value}\`, updatedData);
                     showToast('User updated successfully!');
                     closeEditModal();
                     await fetchAndRenderUsers();
                     await fetchAndRenderStats();
-                } catch (error) {
-                    console.error('Edit user error:', error);
-                    showToast(error.message || 'Failed to update user. Please try again.', true);
-                }
+                } catch (error) { showToast(error.message, true); }
             }
 
             function setDefaultExpiry() {
@@ -758,10 +729,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                 renderUsers(filtered);
             }
 
-            generateUUIDBtn.addEventListener('click', () => {
-                const newUuid = generateUUID();
-                uuidInput.value = newUuid;
-            });
+            generateUUIDBtn.addEventListener('click', () => uuidInput.value = crypto.randomUUID());
             createUserForm.addEventListener('submit', handleCreateUser);
             editUserForm.addEventListener('submit', handleEditUser);
             editModal.addEventListener('click', (e) => { if (e.target === editModal) closeEditModal(); });
@@ -778,11 +746,8 @@ const adminPanelHTML = `<!DOCTYPE html>
             deleteSelectedBtn.addEventListener('click', handleBulkDelete);
             searchInput.addEventListener('input', handleSearch);
 
-            // Initialize form with defaults
-            uuidInput.value = generateUUID();
             setDefaultExpiry();
-
-            // Load initial data
+            uuidInput.value = crypto.randomUUID();
             fetchAndRenderUsers();
             fetchAndRenderStats();
         });
@@ -854,40 +819,23 @@ async function handleAdminRequest(request, env) {
         // POST /admin/api/users - Create a new user
         if (pathname === '/admin/api/users' && request.method === 'POST') {
              try {
-                const body = await request.json();
-                const { uuid, exp_date: expDate, exp_time: expTime, data_limit, notes } = body;
+                const { uuid, exp_date: expDate, exp_time: expTime, data_limit, notes } = await request.json();
 
-                // Enhanced validation with detailed checks
-                if (!uuid || !isValidUUID(uuid)) {
-                    throw new Error('Invalid or missing UUID. Please generate a valid one.');
-                }
-                if (!expDate || !/^\d{4}-\d{2}-\d{2}$/.test(expDate)) {
-                    throw new Error('Invalid expiration date. Use YYYY-MM-DD format.');
-                }
-                if (!expTime || !/^\d{2}:\d{2}:\d{2}$/.test(expTime)) {
-                    throw new Error('Invalid expiration time. Use HH:MM:SS format.');
-                }
-                if (data_limit !== undefined && (typeof data_limit !== 'number' || data_limit < 0)) {
-                    throw new Error('Invalid data limit. Must be a non-negative number.');
-                }
-
-                // Check if UUID already exists
-                const existing = await env.DB.prepare("SELECT uuid FROM users WHERE uuid = ?").bind(uuid).first();
-                if (existing) {
-                    throw new Error('A user with this UUID already exists. Please use a different one.');
+                // Corrected and clarified validation logic
+                if (!uuid || !expDate || !expTime || !/^\d{4}-\d{2}-\d{2}$/.test(expDate) || !/^\d{2}:\d{2}:\d{2}$/.test(expTime)) {
+                    throw new Error('Invalid or missing fields. Use UUID, YYYY-MM-DD, and HH:MM:SS.');
                 }
                  
                 await env.DB.prepare("INSERT INTO users (uuid, expiration_date, expiration_time, data_limit, used_traffic, notes) VALUES (?, ?, ?, ?, 0, ?)")
                     .bind(uuid, expDate, expTime, data_limit || 0, notes || null).run();
-                await env.USER_KV.put(`user:${uuid}`, JSON.stringify({ exp_date: expDate, exp_time: expTime, data_limit: data_limit || 0, used_traffic: 0, notes: notes || null }), { expirationTtl: 3600 });
+                await env.USER_KV.put(`user:${uuid}`, JSON.stringify({ exp_date: expDate, exp_time: expTime, data_limit: data_limit || 0, used_traffic: 0 }));
                  
                 return new Response(JSON.stringify({ success: true, uuid }), { status: 201, headers: jsonHeader });
             } catch (error) {
-                 console.error('Create user backend error:', error);
                  if (error.message?.includes('UNIQUE constraint failed')) {
-                     return new Response(JSON.stringify({ error: 'A user with this UUID already exists. Please generate a new one.' }), { status: 409, headers: jsonHeader });
+                     return new Response(JSON.stringify({ error: 'A user with this UUID already exists.' }), { status: 409, headers: jsonHeader });
                  }
-                 return new Response(JSON.stringify({ error: error.message || 'Invalid input data. Please check your fields.' }), { status: 400, headers: jsonHeader });
+                 return new Response(JSON.stringify({ error: error.message }), { status: 400, headers: jsonHeader });
             }
         }
          
@@ -919,32 +867,24 @@ async function handleAdminRequest(request, env) {
         if (userRouteMatch && request.method === 'PUT') {
             const uuid = userRouteMatch[1];
             try {
-                const body = await request.json();
-                const { exp_date: expDate, exp_time: expTime, data_limit, notes, reset_traffic } = body;
-                if (!expDate || !/^\d{4}-\d{2}-\d{2}$/.test(expDate)) {
-                    throw new Error('Invalid date field. Use YYYY-MM-DD.');
-                }
-                if (!expTime || !/^\d{2}:\d{2}:\d{2}$/.test(expTime)) {
-                    throw new Error('Invalid time field. Use HH:MM:SS.');
-                }
-                if (data_limit !== undefined && (typeof data_limit !== 'number' || data_limit < 0)) {
-                    throw new Error('Invalid data limit. Must be a non-negative number.');
+                const { exp_date: expDate, exp_time: expTime, data_limit, notes, reset_traffic } = await request.json();
+                if (!expDate || !expTime || !/^\d{4}-\d{2}-\d{2}$/.test(expDate) || !/^\d{2}:\d{2}:\d{2}$/.test(expTime)) {
+                    throw new Error('Invalid date/time fields. Use YYYY-MM-DD and HH:MM:SS.');
                 }
                  
                 let query = "UPDATE users SET expiration_date = ?, expiration_time = ?, data_limit = ?, notes = ? WHERE uuid = ?";
                 let binds = [expDate, expTime, data_limit || 0, notes || null, uuid];
-                let usedTraffic = reset_traffic ? 0 : (await getUserData(env, uuid))?.used_traffic || 0;
+                let usedTraffic = reset_traffic ? 0 : (await getUserData(env, uuid)).used_traffic;
                 if (reset_traffic) {
                     query = "UPDATE users SET expiration_date = ?, expiration_time = ?, data_limit = ?, notes = ?, used_traffic = 0 WHERE uuid = ?";
                     binds = [expDate, expTime, data_limit || 0, notes || null, uuid];
                 }
                 await env.DB.prepare(query).bind(...binds).run();
-                await env.USER_KV.put(`user:${uuid}`, JSON.stringify({ exp_date: expDate, exp_time: expTime, data_limit: data_limit || 0, used_traffic: usedTraffic, notes: notes || null }), { expirationTtl: 3600 });
+                await env.USER_KV.put(`user:${uuid}`, JSON.stringify({ exp_date: expDate, exp_time: expTime, data_limit: data_limit || 0, used_traffic: usedTraffic }));
                  
                 return new Response(JSON.stringify({ success: true, uuid }), { status: 200, headers: jsonHeader });
             } catch (error) {
-                console.error('Update user backend error:', error);
-                return new Response(JSON.stringify({ error: error.message || 'Invalid input data for update.' }), { status: 400, headers: jsonHeader });
+                return new Response(JSON.stringify({ error: error.message }), { status: 400, headers: jsonHeader });
             }
         }
          
@@ -956,7 +896,6 @@ async function handleAdminRequest(request, env) {
                 await env.USER_KV.delete(`user:${uuid}`);
                 return new Response(JSON.stringify({ success: true, uuid }), { status: 200, headers: jsonHeader });
             } catch (error) {
-                console.error('Delete user backend error:', error);
                 return new Response(JSON.stringify({ error: error.message }), { status: 500, headers: jsonHeader });
             }
         }
@@ -969,7 +908,7 @@ async function handleAdminRequest(request, env) {
         if (request.method === 'POST') {
             const formData = await request.formData();
             if (formData.get('password') === env.ADMIN_KEY) {
-                const token = generateUUID();
+                const token = crypto.randomUUID();
                 await env.USER_KV.put('admin_session_token', token, { expirationTtl: 86400 }); // 24 hour session
                 return new Response(null, {
                     status: 302,
