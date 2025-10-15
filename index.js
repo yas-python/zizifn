@@ -256,7 +256,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                             <option value="GB" selected>GB</option>
                             <option value="TB">TB</option>
                         </select>
-                        <button type="button" class="btn btn-secondary" onclick="setUnlimited()">Unlimited</button>
+                        <button type="button" class="btn btn-secondary" id="setUnlimitedCreate">Unlimited</button>
                     </div>
                     <div class="label-note">0 or Unlimited for no limit.</div>
                 </div>
@@ -311,7 +311,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                             <option value="GB" selected>GB</option>
                             <option value="TB">TB</option>
                         </select>
-                        <button type="button" class="btn btn-secondary" onclick="setUnlimited(true)">Unlimited</button>
+                        <button type="button" class="btn btn-secondary" id="setUnlimitedEdit">Unlimited</button>
                     </div>
                     <div class="label-note">0 or Unlimited for no limit.</div>
                 </div>
@@ -745,6 +745,8 @@ const adminPanelHTML = `<!DOCTYPE html>
             selectAllCheckbox.addEventListener('change', handleSelectAll);
             deleteSelectedBtn.addEventListener('click', handleBulkDelete);
             searchInput.addEventListener('input', handleSearch);
+            document.getElementById('setUnlimitedCreate').addEventListener('click', () => setUnlimited(false));
+            document.getElementById('setUnlimitedEdit').addEventListener('click', () => setUnlimited(true));
 
             setDefaultExpiry();
             uuidInput.value = crypto.randomUUID();
@@ -912,7 +914,7 @@ async function handleAdminRequest(request, env) {
                 await env.USER_KV.put('admin_session_token', token, { expirationTtl: 86400 }); // 24 hour session
                 return new Response(null, {
                     status: 302,
-                    headers: { 'Location': '/admin', 'Set-Cookie': `auth_token=${token}; HttpOnly; Secure; Path=/admin; Max-Age=86400; SameSite=Strict` },
+                    headers: { 'Location': '/admin', 'Set-Cookie': `auth_token=${token}; HttpOnly; Secure; Path=/; Max-Age=86400; SameSite=Strict` },
                 });
             } else {
                 const loginPageWithError = adminLoginHTML.replace('</form>', '</form><p class="error">Invalid password.</p>');
@@ -1999,10 +2001,10 @@ function getPageCSS() {
     .ip-info-item .label { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
     .ip-info-item .value { font-size: 14px; color: var(--text-primary); word-break: break-all; line-height: 1.4; }
     .badge { display: inline-flex; align-items: center; justify-content: center; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
-    .badge-yes { background-color: rgba(112, 181, 112, 0.15); color: var(--status-success); border: 1px solid rgba(112, 181, 112, 0.3); }
-    .badge-no { background-color: rgba(224, 93, 68, 0.15); color: var(--status-error); border: 1px solid rgba(224, 93, 68, 0.3); }
-    .badge-neutral { background-color: rgba(79, 144, 196, 0.15); color: var(--status-info); border: 1px solid rgba(79, 144, 196, 0.3); }
-    .badge-warning { background-color: rgba(224, 188, 68, 0.15); color: var(--status-warning); border: 1px solid rgba(224, 188, 68, 0.3); }
+    .badge-yes { display: inline-flex; background-color: rgba(112, 181, 112, 0.15); color: var(--status-success); border: 1px solid rgba(112, 181, 112, 0.3); }
+    .badge-no { display: inline-flex; background-color: rgba(224, 93, 68, 0.15); color: var(--status-error); border: 1px solid rgba(224, 93, 68, 0.3); }
+    .badge-neutral { display: inline-flex; background-color: rgba(79, 144, 196, 0.15); color: var(--status-info); border: 1px solid rgba(79, 144, 196, 0.3); }
+    .badge-warning { display: inline-flex; background-color: rgba(224, 188, 68, 0.15); color: var(--status-warning); border: 1px solid rgba(224, 188, 68, 0.3); }
     .skeleton { display: block; background: linear-gradient(90deg, var(--background-tertiary) 25%, var(--background-secondary) 50%, var(--background-tertiary) 75%); background-size: 200% 100%; animation: loading 1.5s infinite; border-radius: 4px; height: 16px; }
     @keyframes loading { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
     .country-flag { display: inline-block; width: 18px; height: auto; max-height: 14px; margin-right: 6px; vertical-align: middle; border-radius: 2px; }
