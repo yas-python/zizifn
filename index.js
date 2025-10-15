@@ -1,21 +1,29 @@
 import { connect } from 'cloudflare:sockets';
 
+// Custom log function for better debugging
+function log(message, level = 'info') {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] [${level.toUpperCase()}] ${message}`);
+  // Optionally store logs in KV (uncomment if needed)
+  // env.LOG_KV.put(`log:${Date.now()}`, JSON.stringify({ timestamp, level, message }));
+}
+
 // Helper functions (updated for robustness)
 /**
- * Generates a standard RFC4122 version 4 UUID.
- * @returns {string} A new UUID.
- */
+* Generates a standard RFC4122 version 4 UUID.
+* @returns {string} A new UUID.
+*/
 function generateUUID() {
   return crypto.randomUUID();
 }
 
 /**
- * Checks if the expiration date and time are in the future.
- * Treats the stored time as UTC to prevent timezone ambiguity.
- * @param {string} expDate - The expiration date in 'YYYY-MM-DD' format.
- * @param {string} expTime - The expiration time in 'HH:MM:SS' format.
- * @returns {boolean} - True if the expiration is in the future, otherwise false.
- */
+* Checks if the expiration date and time are in the future.
+* Treats the stored time as UTC to prevent timezone ambiguity.
+* @param {string} expDate - The expiration date in 'YYYY-MM-DD' format.
+* @param {string} expTime - The expiration time in 'HH:MM:SS' format.
+* @returns {boolean} - True if the expiration is in the future, otherwise false.
+*/
 async function checkExpiration(expDate, expTime) {
   if (!expDate || !expTime) return false;
   const expDatetimeUTC = new Date(`${expDate}T${expTime}Z`);
@@ -23,18 +31,18 @@ async function checkExpiration(expDate, expTime) {
 }
 
 /**
- * Retrieves user data from KV cache or falls back to D1 database.
- * @param {object} env - The worker environment object.
- * @param {string} uuid - The user's UUID.
- * @returns {Promise<object|null>} - The user data or null if not found.
- */
+* Retrieves user data from KV cache or falls back to D1 database.
+* @param {object} env - The worker environment object.
+* @param {string} uuid - The user's UUID.
+* @returns {Promise<object|null>} - The user data or null if not found.
+*/
 async function getUserData(env, uuid) {
   let userData = await env.USER_KV.get(`user:${uuid}`);
   if (userData) {
     try {
       return JSON.parse(userData);
     } catch (e) {
-      console.error(`Failed to parse user data from KV for UUID: ${uuid}`, e);
+      log(`Failed to parse user data from KV for UUID: ${uuid}`, 'error');
     }
   }
 
@@ -52,11 +60,11 @@ async function getUserData(env, uuid) {
 }
 
 /**
- * Updates the used traffic for a user in D1 and KV.
- * @param {object} env - The worker environment object.
- * @param {string} uuid - The user's UUID.
- * @param {number} additionalTraffic - The additional traffic in bytes to add.
- */
+* Updates the used traffic for a user in D1 and KV.
+* @param {object} env - The worker environment object.
+* @param {string} uuid - The user's UUID.
+* @param {number} additionalTraffic - The additional traffic in bytes to add.
+*/
 async function updateUsedTraffic(env, uuid, additionalTraffic) {
   if (additionalTraffic <= 0) return;
 
@@ -72,10 +80,10 @@ async function updateUsedTraffic(env, uuid, additionalTraffic) {
 }
 
 /**
- * Fetches dashboard stats from D1.
- * @param {object} env - The worker environment object.
- * @returns {Promise<object>} - Stats object.
- */
+* Fetches dashboard stats from D1.
+* @param {object} env - The worker environment object.
+* @returns {Promise<object>} - Stats object.
+*/
 async function fetchDashboardStats(env) {
   const now = new Date().toISOString().split('T')[0]; // Current UTC date
   const nowTime = new Date().toISOString().split('T')[1].slice(0, 8); // Current UTC time
@@ -124,13 +132,14 @@ const adminLoginHTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
-// --- IMPROVED ADMIN PANEL HTML with Dashboard Stats, Bulk Delete, and Search ---
+// --- IMPROVED ADMIN PANEL HTML with Dashboard Stats, Bulk Delete, Search, Pagination, Export, and Chart ---
 const adminPanelHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Admin Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         :root {
             --bg-main: #111827; --bg-card: #1F2937; --border: #374151; --text-primary: #F9FAFB;
@@ -215,6 +224,11 @@ const adminPanelHTML = `<!DOCTYPE html>
         .table-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
         .delete-selected-btn { background-color: var(--danger); color: white; }
         .delete-selected-btn:hover { background-color: var(--danger-hover); }
+        .pagination { display: flex; justify-content: center; gap: 8px; margin-top: 16px; }
+        .pagination .btn { padding: 6px 12px; }
+        .export-btn { background-color: #10B981; color: white; }
+        .export-btn:hover { background-color: #059669; }
+        #statsChart { margin-top: 20px; }
         @media (max-width: 768px) {
             tr { border: 1px solid var(--border); border-radius: 8px; display: block; margin-bottom: 1rem; }
             td { border: none; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
@@ -230,6 +244,7 @@ const adminPanelHTML = `<!DOCTYPE html>
         <div class="dashboard-grid" id="dashboardStats">
             <!-- Stats will be loaded here -->
         </div>
+        <canvas id="statsChart" width="400" height="200"></canvas>
         <div class="card">
             <h2>Create User</h2>
             <form id="createUserForm" class="form-grid">
@@ -271,12 +286,16 @@ const adminPanelHTML = `<!DOCTYPE html>
             </div>
             <div class="table-header">
                 <button id="deleteSelected" class="btn btn-danger delete-selected-btn">Delete Selected</button>
+                <button id="exportUsers" class="btn export-btn">Export to CSV</button>
             </div>
             <div style="overflow-x: auto;">
                  <table>
                     <thead><tr><th><input type="checkbox" id="selectAll"></th><th>UUID</th><th>Created</th><th>Expiry (Admin Local)</th><th>Expiry (Tehran)</th><th>Status</th><th>Traffic</th><th>Notes</th><th>Actions</th></tr></thead>
                     <tbody id="userList"></tbody>
                 </table>
+            </div>
+            <div class="pagination" id="pagination">
+                <!-- Pagination buttons will be added here -->
             </div>
         </div>
     </div>
@@ -289,6 +308,7 @@ const adminPanelHTML = `<!DOCTYPE html>
             </div>
             <form id="editUserForm">
                 <input type="hidden" id="editUuid" name="uuid">
+                <input type="hidden" id="csrfToken" name="csrf">
                 <div class="form-group"><label for="editExpiryDate">Expiry Date</label><input type="date" id="editExpiryDate" name="exp_date" required></div>
                 <div class="form-group" style="margin-top: 16px;">
                     <label for="editExpiryTime">Expiry Time (Your Local Time)</label>
@@ -340,6 +360,12 @@ const adminPanelHTML = `<!DOCTYPE html>
             const deleteSelectedBtn = document.getElementById('deleteSelected');
             const searchInput = document.getElementById('searchInput');
             const dashboardStats = document.getElementById('dashboardStats');
+            const pagination = document.getElementById('pagination');
+            const csrfTokenInput = document.getElementById('csrfToken');
+            let currentPage = 1;
+            const pageSize = 20;
+            let searchDebounceTimer;
+            let csrfToken = crypto.randomUUID(); // Generate CSRF token
 
             function showToast(message, isError = false) {
                 toast.textContent = message;
@@ -350,9 +376,9 @@ const adminPanelHTML = `<!DOCTYPE html>
 
             const api = {
                 get: (endpoint) => fetch(\`\${API_BASE}\${endpoint}\`, { credentials: 'include' }).then(handleResponse),
-                post: (endpoint, body) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'POST', credentials: 'include', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) }).then(handleResponse),
-                put: (endpoint, body) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'PUT', credentials: 'include', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) }).then(handleResponse),
-                delete: (endpoint) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'DELETE', credentials: 'include' }).then(handleResponse),
+                post: (endpoint, body) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'POST', credentials: 'include', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken}, body: JSON.stringify(body) }).then(handleResponse),
+                put: (endpoint, body) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'PUT', credentials: 'include', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken}, body: JSON.stringify(body) }).then(handleResponse),
+                delete: (endpoint) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'DELETE', credentials: 'include', headers: {'X-CSRF-Token': csrfToken} }).then(handleResponse),
             };
 
             async function handleResponse(response) {
@@ -542,6 +568,24 @@ const adminPanelHTML = `<!DOCTYPE html>
                         <p>Total Traffic Used</p>
                     </div>
                 \`;
+                // Render chart
+                const ctx = document.getElementById('statsChart').getContext('2d');
+                new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels: ['Total Users', 'Active Users', 'Expired Users', 'Total Traffic (Bytes)'],
+                        datasets: [{
+                            label: 'Stats',
+                            data: [stats.totalUsers, stats.activeUsers, stats.expiredUsers, stats.totalTraffic],
+                            backgroundColor: [var(--accent), var(--success), var(--expired), var(--warning)],
+                        }]
+                    },
+                    options: {
+                        scales: {
+                            y: { beginAtZero: true }
+                        }
+                    }
+                });
             }
 
             function renderUsers(filteredUsers = allUsers) {
@@ -598,6 +642,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                     allUsers = await api.get('/users');
                     allUsers.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
                     renderUsers();
+                    renderPagination(allUsers.length);
                 } catch (error) { showToast(error.message, true); }
             }
 
@@ -722,11 +767,47 @@ const adminPanelHTML = `<!DOCTYPE html>
             }
 
             function handleSearch() {
-                const searchTerm = searchInput.value.toLowerCase();
-                const filtered = allUsers.filter(user => 
-                    user.uuid.toLowerCase().includes(searchTerm) || (user.notes || '').toLowerCase().includes(searchTerm)
-                );
-                renderUsers(filtered);
+                clearTimeout(searchDebounceTimer);
+                searchDebounceTimer = setTimeout(() => {
+                    const searchTerm = searchInput.value.toLowerCase();
+                    const filtered = allUsers.filter(user => 
+                        user.uuid.toLowerCase().includes(searchTerm) || (user.notes || '').toLowerCase().includes(searchTerm)
+                    );
+                    renderUsers(filtered);
+                }, 300); // Debounce for 300ms
+            }
+
+            function exportToCSV() {
+                const csv = ['UUID,Created,Expiry Date,Expiry Time,Data Limit,Used Traffic,Notes'];
+                allUsers.forEach(user => {
+                    csv.push(\`\${user.uuid},\${user.created_at},\${user.expiration_date},\${user.expiration_time},\${user.data_limit},\${user.used_traffic},\${user.notes || ''}\`);
+                });
+                const blob = new Blob([csv.join('\\n')], { type: 'text/csv' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'users.csv';
+                a.click();
+                URL.revokeObjectURL(url);
+            }
+
+            function renderPagination(totalItems) {
+                pagination.innerHTML = '';
+                const totalPages = Math.ceil(totalItems / pageSize);
+                if (currentPage > 1) {
+                    const prevBtn = document.createElement('button');
+                    prevBtn.classList.add('btn', 'btn-secondary');
+                    prevBtn.textContent = 'Previous';
+                    prevBtn.onclick = () => { currentPage--; fetchAndRenderUsers(); };
+                    pagination.appendChild(prevBtn);
+                }
+                if (currentPage < totalPages) {
+                    const nextBtn = document.createElement('button');
+                    nextBtn.classList.add('btn', 'btn-secondary');
+                    nextBtn.textContent = 'Next';
+                    nextBtn.onclick = () => { currentPage++; fetchAndRenderUsers(); };
+                    pagination.appendChild(nextBtn);
+                }
             }
 
             generateUUIDBtn.addEventListener('click', () => uuidInput.value = crypto.randomUUID());
@@ -747,11 +828,13 @@ const adminPanelHTML = `<!DOCTYPE html>
             searchInput.addEventListener('input', handleSearch);
             document.getElementById('setUnlimitedCreate').addEventListener('click', () => setUnlimited(false));
             document.getElementById('setUnlimitedEdit').addEventListener('click', () => setUnlimited(true));
+            document.getElementById('exportUsers').addEventListener('click', exportToCSV);
 
             setDefaultExpiry();
             uuidInput.value = crypto.randomUUID();
             fetchAndRenderUsers();
             fetchAndRenderStats();
+            setInterval(fetchAndRenderStats, 30000); // Auto-refresh stats every 30s
         });
     </script>
 </body>
@@ -769,6 +852,23 @@ async function isAdmin(request, env) {
     return storedToken && storedToken === token;
 }
 
+// Rate limiter (simple in-memory, for advanced use Durable Objects)
+const rateLimiter = new Map(); // userIP: {count, timestamp}
+function checkRateLimit(ip) {
+  const now = Date.now();
+  const entry = rateLimiter.get(ip) || { count: 0, timestamp: now };
+  if (now - entry.timestamp > 60000) { // Reset every minute
+    entry.count = 0;
+    entry.timestamp = now;
+  }
+  entry.count++;
+  rateLimiter.set(ip, entry);
+  if (entry.count > 10) { // 10 requests/min limit
+    return false;
+  }
+  return true;
+}
+
 /**
 * --- Handles all incoming requests to /admin/* routes with API routing. ---
 * @param {Request} request
@@ -779,6 +879,10 @@ async function handleAdminRequest(request, env) {
     const url = new URL(request.url);
     const { pathname } = url;
     const jsonHeader = { 'Content-Type': 'application/json' };
+    const ip = request.headers.get('CF-Connecting-IP');
+    if (!checkRateLimit(ip)) {
+        return new Response(JSON.stringify({ error: 'Rate limit exceeded' }), { status: 429, headers: jsonHeader });
+    }
 
     if (!env.ADMIN_KEY) {
         return new Response('Admin panel is not configured.', { status: 503 });
@@ -790,8 +894,12 @@ async function handleAdminRequest(request, env) {
             return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: jsonHeader });
         }
         
-        // --- ENHANCEMENT: Basic CSRF protection for mutating requests ---
+        // Enhanced CSRF: Check X-CSRF-Token for mutating methods
         if (request.method !== 'GET') {
+            const csrfToken = request.headers.get('X-CSRF-Token');
+            if (!csrfToken || csrfToken !== await env.USER_KV.get('csrf_token')) {
+                return new Response(JSON.stringify({ error: 'Invalid CSRF token' }), { status: 403, headers: jsonHeader });
+            }
             const origin = request.headers.get('Origin');
             if (!origin || new URL(origin).hostname !== url.hostname) {
                 return new Response(JSON.stringify({ error: 'Invalid Origin' }), { status: 403, headers: jsonHeader });
@@ -804,6 +912,7 @@ async function handleAdminRequest(request, env) {
                 const stats = await fetchDashboardStats(env);
                 return new Response(JSON.stringify(stats), { status: 200, headers: jsonHeader });
             } catch (e) {
+                log(e.message, 'error');
                 return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: jsonHeader });
             }
         }
@@ -814,6 +923,7 @@ async function handleAdminRequest(request, env) {
                 const { results } = await env.DB.prepare("SELECT uuid, created_at, expiration_date, expiration_time, data_limit, used_traffic, notes FROM users ORDER BY created_at DESC").all();
                 return new Response(JSON.stringify(results ?? []), { status: 200, headers: jsonHeader });
             } catch (e) {
+                log(e.message, 'error');
                 return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: jsonHeader });
             }
         }
@@ -823,7 +933,7 @@ async function handleAdminRequest(request, env) {
              try {
                 const { uuid, exp_date: expDate, exp_time: expTime, data_limit, notes } = await request.json();
 
-                // Corrected and clarified validation logic
+                // Corrected validation logic
                 if (!uuid || !expDate || !expTime || !/^\d{4}-\d{2}-\d{2}$/.test(expDate) || !/^\d{2}:\d{2}:\d{2}$/.test(expTime)) {
                     throw new Error('Invalid or missing fields. Use UUID, YYYY-MM-DD, and HH:MM:SS.');
                 }
@@ -834,6 +944,7 @@ async function handleAdminRequest(request, env) {
                  
                 return new Response(JSON.stringify({ success: true, uuid }), { status: 201, headers: jsonHeader });
             } catch (error) {
+                 log(error.message, 'error');
                  if (error.message?.includes('UNIQUE constraint failed')) {
                      return new Response(JSON.stringify({ error: 'A user with this UUID already exists.' }), { status: 409, headers: jsonHeader });
                  }
@@ -858,6 +969,7 @@ async function handleAdminRequest(request, env) {
                  
                 return new Response(JSON.stringify({ success: true, count: uuids.length }), { status: 200, headers: jsonHeader });
             } catch (error) {
+                log(error.message, 'error');
                 return new Response(JSON.stringify({ error: error.message }), { status: 400, headers: jsonHeader });
             }
         }
@@ -886,6 +998,7 @@ async function handleAdminRequest(request, env) {
                  
                 return new Response(JSON.stringify({ success: true, uuid }), { status: 200, headers: jsonHeader });
             } catch (error) {
+                log(error.message, 'error');
                 return new Response(JSON.stringify({ error: error.message }), { status: 400, headers: jsonHeader });
             }
         }
@@ -898,6 +1011,7 @@ async function handleAdminRequest(request, env) {
                 await env.USER_KV.delete(`user:${uuid}`);
                 return new Response(JSON.stringify({ success: true, uuid }), { status: 200, headers: jsonHeader });
             } catch (error) {
+                log(error.message, 'error');
                 return new Response(JSON.stringify({ error: error.message }), { status: 500, headers: jsonHeader });
             }
         }
@@ -911,7 +1025,9 @@ async function handleAdminRequest(request, env) {
             const formData = await request.formData();
             if (formData.get('password') === env.ADMIN_KEY) {
                 const token = crypto.randomUUID();
+                csrfToken = crypto.randomUUID(); // Generate new CSRF for session
                 await env.USER_KV.put('admin_session_token', token, { expirationTtl: 86400 }); // 24 hour session
+                await env.USER_KV.put('csrf_token', csrfToken, { expirationTtl: 86400 });
                 return new Response(null, {
                     status: 302,
                     headers: { 'Location': '/admin', 'Set-Cookie': `auth_token=${token}; HttpOnly; Secure; Path=/; Max-Age=86400; SameSite=Strict` },
@@ -1168,7 +1284,7 @@ export default {
         });
 
       } catch (e) {
-        console.error(`Reverse Proxy Error: ${e.message}`);
+        log(`Reverse Proxy Error: ${e.message}`, 'error');
         return new Response(`Proxy configuration error or upstream server is down. Please check the ROOT_PROXY_URL variable. Error: ${e.message}`, { status: 502 });
       }
     }
@@ -1223,7 +1339,7 @@ async function ProtocolOverWSHandler(request, config, env) {
           } = await ProcessProtocolHeader(chunk, env);
 
           address = addressRemote;
-          portWithRandomLog = `${portRemote}--${Math.random()} ${isUDP ? 'udp' : 'tcp'}` ;
+          portWithRandomLog = `${portRemote}--${Math.random()} ${isUDP ? 'udp' : 'tcp'} `;
 
           if (hasError) {
             controller.error(message);
@@ -1284,7 +1400,6 @@ async function ProcessProtocolHeader(protocolBuffer, env) {
   const slicedBufferString = stringify(new Uint8Array(protocolBuffer.slice(1, 17)));
 
   const userData = await getUserData(env, slicedBufferString);
-
   if (!userData || !(await checkExpiration(userData.exp_date, userData.exp_time)) || (userData.data_limit > 0 && userData.used_traffic >= userData.data_limit)) {
     return { hasError: true, message: 'invalid or expired user or traffic limit reached' };
   }
@@ -1707,26 +1822,24 @@ function generateBeautifulConfigPage(userID, hostName, proxyAddress, expDate = '
   let expirationBlock = '';
   if (expDate && expTime) {
       const utcTimestamp = `${expDate}T${expTime.split('.')[0]}Z`;
-      expirationBlock = `
-        <div class="expiration-card">
+      expirationBlock = 
+        `<div class="expiration-card">
           <div class="expiration-card-content">
             <h2 class="expiration-title">Expiration Date</h2>
             <div id="expiration-relative" class="expiration-relative-time"></div>
             <hr class="expiration-divider">
             <div id="expiration-display" data-utc-time="${utcTimestamp}">Loading expiration time...</div>
           </div>
-        </div>
-      `;
+        </div>`;
   } else {
-      expirationBlock = `
-        <div class="expiration-card">
+      expirationBlock = 
+        `<div class="expiration-card">
           <div class="expiration-card-content">
             <h2 class="expiration-title">Expiration Date</h2>
             <hr class="expiration-divider">
             <div id="expiration-display">No expiration date set.</div>
           </div>
-        </div>
-      `;
+        </div>`;
   }
 
   let trafficBlock = '';
@@ -1735,16 +1848,15 @@ function generateBeautifulConfigPage(userID, hostName, proxyAddress, expDate = '
   let progressClass = '';
   if (progressPercent > 90) progressClass = 'danger';
   else if (progressPercent > 70) progressClass = 'warning';
-  trafficBlock = `
-    <div class="expiration-card">
+  trafficBlock = 
+    `<div class="expiration-card">
       <div class="expiration-card-content">
         <h2 class="expiration-title">Data Usage</h2>
         <hr class="expiration-divider">
         <div class="progress-bar-container"><div class="progress-bar ${progressClass}" style="width: ${progressPercent}%"></div></div>
         <div class="traffic-text">${trafficText}</div>
       </div>
-    </div>
-  `;
+    </div>`;
 
   const finalHTML = `<!doctype html>
   <html lang="en">
@@ -1810,7 +1922,7 @@ function getPageCSS() {
         background-color: var(--background-primary); color: var(--text-primary);
         padding: 3rem; line-height: 1.5; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
       }
-      
+       
       @keyframes rgb-animation {
         0% { transform: rotate(0deg); }
         100% { transform: rotate(360deg); }
@@ -2001,10 +2113,10 @@ function getPageCSS() {
     .ip-info-item .label { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
     .ip-info-item .value { font-size: 14px; color: var(--text-primary); word-break: break-all; line-height: 1.4; }
     .badge { display: inline-flex; align-items: center; justify-content: center; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
-    .badge-yes { display: inline-flex; background-color: rgba(112, 181, 112, 0.15); color: var(--status-success); border: 1px solid rgba(112, 181, 112, 0.3); }
-    .badge-no { display: inline-flex; background-color: rgba(224, 93, 68, 0.15); color: var(--status-error); border: 1px solid rgba(224, 93, 68, 0.3); }
-    .badge-neutral { display: inline-flex; background-color: rgba(79, 144, 196, 0.15); color: var(--status-info); border: 1px solid rgba(79, 144, 196, 0.3); }
-    .badge-warning { display: inline-flex; background-color: rgba(224, 188, 68, 0.15); color: var(--status-warning); border: 1px solid rgba(224, 188, 68, 0.3); }
+    .badge-yes { background-color: rgba(112, 181, 112, 0.15); color: var(--status-success); border: 1px solid rgba(112, 181, 112, 0.3); }
+    .badge-no { background-color: rgba(224, 93, 68, 0.15); color: var(--status-error); border: 1px solid rgba(224, 93, 68, 0.3); }
+    .badge-neutral { background-color: rgba(79, 144, 196, 0.15); color: var(--status-info); border: 1px solid rgba(79, 144, 196, 0.3); }
+    .badge-warning { background-color: rgba(224, 188, 68, 0.15); color: var(--status-warning); border: 1px solid rgba(224, 188, 68, 0.3); }
     .skeleton { display: block; background: linear-gradient(90deg, var(--background-tertiary) 25%, var(--background-secondary) 50%, var(--background-tertiary) 75%); background-size: 200% 100%; animation: loading 1.5s infinite; border-radius: 4px; height: 16px; }
     @keyframes loading { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
     .country-flag { display: inline-block; width: 18px; height: auto; max-height: 14px; margin-right: 6px; vertical-align: middle; border-radius: 2px; }
@@ -2373,7 +2485,7 @@ function getPageScript() {
 
           if (proxyDomainOrIp && proxyDomainOrIp !== "N/A") {
             let resolvedProxyIp = proxyDomainOrIp;
-            if (!/^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$/.test(proxyDomainOrIp) && !/^[0-9a-fA-F:]+$/.test(proxyDomainOrIp)) {
+            if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(proxyDomainOrIp) && !/^[0-9a-fA-F:]+$/.test(proxyDomainOrIp)) {
               try {
                 const dnsRes = await fetch(\`https://dns.google/resolve?name=\${encodeURIComponent(proxyDomainOrIp)}&type=A\`);
                 if (dnsRes.ok) {
@@ -2476,13 +2588,13 @@ function getPageScript() {
             }
           });
         });
-        
+         
         document.getElementById('refresh-ip-info')?.addEventListener('click', function() {
             const button = this;
             const icon = button.querySelector('.refresh-icon');
             button.disabled = true;
             if (icon) icon.style.animation = 'spin 1s linear infinite';
-    
+     
             const resetToSkeleton = (prefix) => {
               const elementsToReset = ['ip', 'location', 'isp'];
               if (prefix === 'proxy') elementsToReset.push('host');
@@ -2492,7 +2604,7 @@ function getPageScript() {
                 if (element) element.innerHTML = \`<span class="skeleton" style="width: 120px;"></span>\`;
               });
             };
-    
+     
             resetToSkeleton('proxy');
             resetToSkeleton('client');
             loadNetworkInfo().finally(() => setTimeout(() => {
