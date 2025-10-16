@@ -1,12 +1,11 @@
 /**
  * Cloudflare Worker VLESS - Ultimate Edition (Corrected & Improved by Gemini)
  *
- * @version 3.4.0
- * @description This version fixes the admin panel's user creation functionality by aligning data field names.
- * It intelligently handles ROOT_PROXY_URL to prevent conflicts with the admin panel API,
- * ensuring both features can coexist without errors. It combines a feature-rich admin panel with traffic management
- * and a professional user configuration page. It leverages Cloudflare D1 for persistent user data, KV for caching,
- * and provides a robust VLESS-over-WebSocket proxy.
+ * @version 3.5.0
+ * @description This version introduces ctx.waitUntil() for database operations to ensure writes are
+ * completed in the Pages Functions environment, fixing the issue of users not being created without errors.
+ * It intelligently handles ROOT_PROXY_URL, combines a feature-rich admin panel with traffic management,
+ * and leverages Cloudflare D1 and KV for a robust VLESS-over-WebSocket proxy.
  *
  * --- SETUP INSTRUCTIONS ---
  * 1. D1 Database: Create a D1 database and run the schema below.
@@ -410,7 +409,6 @@ function getAdminPanelScript(csrfToken) {
             const { utcDate, utcTime } = localToUTC(document.getElementById('expiryDate').value, document.getElementById('expiryTime').value);
             if (!utcDate || !utcTime) return showToast('Invalid date or time.', true);
             
-            // **FIX:** Use field names that match the database columns for consistency.
             const userData = {
                 uuid: uuidInput.value,
                 expiration_date: utcDate,
@@ -471,7 +469,6 @@ function getAdminPanelScript(csrfToken) {
             const { utcDate, utcTime } = localToUTC(document.getElementById('editExpiryDate').value, document.getElementById('editExpiryTime').value);
             if (!utcDate || !utcTime) return showToast('Invalid date or time.', true);
 
-            // **FIX:** Use field names that match the database columns for consistency.
             const updatedData = {
                 expiration_date: utcDate,
                 expiration_time: utcTime,
@@ -566,33 +563,8 @@ function getAdminPanelScript(csrfToken) {
 
 const adminPanelHTML = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Admin Dashboard</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script><style>:root{--bg-main:#111827;--bg-card:#1F2937;--border:#374151;--text-primary:#F9FAFB;--text-secondary:#9CA3AF;--accent:#3B82F6;--accent-hover:#2563EB;--danger:#EF4444;--danger-hover:#DC2626;--success:#22C55E;--expired:#F59E0B;--btn-secondary-bg:#4B5563}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background-color:var(--bg-main);color:var(--text-primary);font-size:14px}.container{max-width:1200px;margin:40px auto;padding:0 20px}h1,h2{font-weight:600}h1{font-size:24px;margin-bottom:20px}h2{font-size:18px;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:20px}.card{background-color:var(--bg-card);border-radius:8px;padding:24px;border:1px solid var(--border);box-shadow:0 4px 6px rgba(0,0,0,.1)}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;align-items:flex-end}.form-group{display:flex;flex-direction:column}.form-group label{margin-bottom:8px;font-weight:500;color:var(--text-secondary)}.form-group .input-group{display:flex}input[type=text],input[type=date],input[type=time],input[type=number],select{width:100%;box-sizing:border-box;background-color:#374151;border:1px solid #4B5563;color:var(--text-primary);padding:10px;border-radius:6px;font-size:14px;transition:border-color .2s}input:focus{outline:0;border-color:var(--accent)}.label-note{font-size:11px;color:var(--text-secondary);margin-top:4px}.btn{padding:10px 16px;border:0;border-radius:6px;font-weight:600;cursor:pointer;transition:background-color .2s,transform .1s;display:inline-flex;align-items:center;justify-content:center;gap:8px}.btn:active{transform:scale(.98)}.btn-primary{background-color:var(--accent);color:#fff}.btn-primary:hover{background-color:var(--accent-hover)}.btn-secondary{background-color:var(--btn-secondary-bg);color:#fff}.btn-secondary:hover{background-color:#6B7280}.btn-danger{background-color:var(--danger);color:#fff}.btn-danger:hover{background-color:var(--danger-hover)}.input-group .btn-secondary{border-top-left-radius:0;border-bottom-left-radius:0}.input-group input, .input-group select{border-radius: 0; border-right: 0}.input-group input:first-child, .input-group select:first-child{border-top-left-radius: 6px; border-bottom-left-radius: 6px}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{padding:12px 16px;text-align:left;border-bottom:1px solid var(--border);overflow:hidden;text-overflow:ellipsis}th{color:var(--text-secondary);font-weight:600;font-size:12px;text-transform:uppercase;white-space:nowrap}td{color:var(--text-primary);font-family:"SF Mono","Fira Code",monospace;vertical-align:middle}.status-badge{padding:4px 8px;border-radius:12px;font-size:12px;font-weight:600;display:inline-block}.status-active{background-color:var(--success);color:#064E3B}.status-expired{background-color:var(--expired);color:#78350F}.actions-cell .btn{padding:6px 10px;font-size:12px}#toast{position:fixed;top:20px;right:20px;background-color:var(--bg-card);color:#fff;padding:15px 20px;border-radius:8px;z-index:1001;display:none;border:1px solid var(--border);box-shadow:0 4px 12px rgba(0,0,0,.3);opacity:0;transition:opacity .3s,transform .3s;transform:translateY(-20px)}#toast.show{display:block;opacity:1;transform:translateY(0)}#toast.error{border-left:5px solid var(--danger)}#toast.success{border-left:5px solid var(--success)}.actions-cell{display:flex;gap:8px;justify-content:flex-start}.modal-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background-color:rgba(0,0,0,.7);z-index:1000;display:flex;justify-content:center;align-items:center;opacity:0;visibility:hidden;transition:opacity .3s,visibility .3s}.modal-overlay.show{opacity:1;visibility:visible}.modal-content{background-color:var(--bg-card);padding:30px;border-radius:12px;box-shadow:0 5px 25px rgba(0,0,0,.4);width:90%;max-width:500px;transform:scale(.9);transition:transform .3s;border:1px solid var(--border)}.modal-overlay.show .modal-content{transform:scale(1)}.modal-header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border);padding-bottom:15px;margin-bottom:20px}.modal-header h2{margin:0;border:0;font-size:20px}.modal-close-btn{background:0 0;border:0;color:var(--text-secondary);font-size:24px;cursor:pointer;line-height:1}.modal-footer{display:flex;justify-content:flex-end;gap:12px;margin-top:25px}.time-quick-set-group,.data-quick-set-group{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}.btn-outline-secondary{background-color:transparent;border:1px solid var(--btn-secondary-bg);color:var(--text-secondary);padding:6px 10px;font-size:12px;font-weight:500}.btn-outline-secondary:hover{background-color:var(--btn-secondary-bg);color:#fff;border-color:var(--btn-secondary-bg)}.progress-bar-container{width:100%;background-color:#374151;border-radius:4px;height:8px;overflow:hidden;margin-top:4px}.progress-bar{height:100%;background-color:var(--success);transition:width .3s ease}.progress-bar.warning{background-color:var(--expired)}.progress-bar.danger{background-color:var(--danger)}.traffic-text{font-size:12px;color:var(--text-secondary);margin-top:4px;text-align:right}.dashboard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:30px}.dashboard-stat{background-color:var(--bg-card);padding:16px;border-radius:8px;border:1px solid var(--border);text-align:center}.dashboard-stat h3{font-size:28px;color:var(--accent);margin:0}.dashboard-stat p{color:var(--text-secondary);margin:0;font-size:14px}.search-container{margin-bottom:16px}.search-input{width:100%;padding:10px;border-radius:6px;background-color:#374151;border:1px solid #4B5563;color:var(--text-primary)}.table-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}.pagination{display:flex;justify-content:center;align-items:center;gap:8px;margin-top:24px}.pagination .btn{padding:6px 12px}.pagination span{color:var(--text-secondary);font-size:14px}.export-btn{background-color:#10B981;color:#fff}#statsChartContainer{margin-top:20px;position:relative;height:300px}</style></head><body><div class="container"><h1>Admin Dashboard</h1><div class="dashboard-grid" id="dashboardStats"></div><div id="statsChartContainer"><canvas id="statsChart"></canvas></div><div class="card"><h2>Create User</h2><form id="createUserForm" class="form-grid"><div class="form-group" style="grid-column:1/-1"><label for="uuid">UUID</label><div class="input-group"><input type="text" id="uuid" required><button type="button" id="generateUUID" class="btn btn-secondary">Generate</button></div></div><div class="form-group"><label for="expiryDate">Expiry Date</label><input type="date" id="expiryDate" required></div><div class="form-group"><label for="expiryTime">Expiry Time (Your Local Time)</label><input type="time" id="expiryTime" step="1" required><div class="label-note">Auto-converted to UTC.</div><div class="time-quick-set-group" data-target-date="expiryDate" data-target-time="expiryTime"><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="hour">+1 Hour</button><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="day">+1 Day</button><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="month">+1 Month</button></div></div><div class="form-group"><label for="dataLimit">Data Limit</label><div class="input-group"><input type="number" id="dataLimitValue" min="0" value="0" required><select id="dataLimitUnit"><option value="GB" selected>GB</option><option value="MB">MB</option><option value="TB">TB</option><option value="KB">KB</option></select><button type="button" class="btn btn-secondary" id="setUnlimitedCreate">Unlimited</button></div><div class="data-quick-set-group"><button type="button" class="btn btn-outline-secondary" data-gb="10">10GB</button><button type="button" class="btn btn-outline-secondary" data-gb="50">50GB</button><button type="button" class="btn btn-outline-secondary" data-gb="100">100GB</button></div></div><div class="form-group"><label for="notes">Notes</label><input type="text" id="notes" placeholder="(Optional)"></div><div class="form-group"><label>&nbsp;</label><button type="submit" class="btn btn-primary">Create User</button></div></form></div><div class="card" style="margin-top:30px"><h2>User List</h2><div class="search-container"><input type="text" id="searchInput" class="search-input" placeholder="Search by UUID or Notes..."></div><div class="table-header"><button id="deleteSelected" class="btn btn-danger">Delete Selected</button><button id="exportUsers" class="btn export-btn">Export to CSV</button></div><div style="overflow-x:auto"><table><thead><tr><th><input type="checkbox" id="selectAll"></th><th>UUID</th><th>Created</th><th>Expiry</th><th>Tehran Time</th><th>Status</th><th>Traffic</th><th>Notes</th><th>Actions</th></tr></thead><tbody id="userList"></tbody></table></div><div class="pagination" id="pagination"></div></div></div><div id="toast"></div><div id="editModal" class="modal-overlay"><div class="modal-content"><div class="modal-header"><h2>Edit User</h2><button id="modalCloseBtn" class="modal-close-btn">&times;</button></div><form id="editUserForm"><input type="hidden" id="editUuid" name="uuid"><div class="form-group"><label for="editExpiryDate">Expiry Date</label><input type="date" id="editExpiryDate" name="expiration_date" required></div><div class="form-group" style="margin-top:16px"><label for="editExpiryTime">Expiry Time (Local)</label><input type="time" id="editExpiryTime" name="expiration_time" step="1" required><div class="time-quick-set-group" data-target-date="editExpiryDate" data-target-time="editExpiryTime"><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="hour">+1 Hour</button><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="day">+1 Day</button><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="month">+1 Month</button></div></div><div class="form-group" style="margin-top:16px"><label for="editDataLimit">Data Limit</label><div class="input-group"><input type="number" id="editDataLimitValue" min="0" required><select id="editDataLimitUnit"><option value="GB" selected>GB</option><option value="MB">MB</option><option value="TB">TB</option><option value="KB">KB</option></select><button type="button" class="btn btn-secondary" id="setUnlimitedEdit">Unlimited</button></div><div class="data-quick-set-group"><button type="button" class="btn btn-outline-secondary" data-gb="10">10GB</button><button type="button" class="btn btn-outline-secondary" data-gb="50">50GB</button><button type="button" class="btn btn-outline-secondary" data-gb="100">100GB</button></div></div><div class="form-group" style="margin-top:16px"><label for="editNotes">Notes</label><input type="text" id="editNotes" name="notes" placeholder="(Optional)"></div><div class="form-group" style="margin-top:16px"><label><input type="checkbox" id="resetTraffic" name="resetTraffic"> Reset Traffic Usage</label></div><div class="modal-footer"><button type="button" id="modalCancelBtn" class="btn btn-secondary">Cancel</button><button type="submit" class="btn btn-primary">Save Changes</button></div></form></div></div><script>/* SCRIPT_PLACEHOLDER */</script></body></html>`;
 
-async function isAdmin(request, env) {
-    const cookieHeader = request.headers.get('Cookie');
-    if (!cookieHeader) return false;
-    const token = cookieHeader.match(/auth_token=([^;]+)/)?.[1];
-    if (!token) return false;
-    const storedToken = await env.USER_KV.get('admin_session_token');
-    return storedToken && storedToken === token;
-}
-
-const rateLimiter = new Map();
-function checkRateLimit(ip) {
-    const now = Date.now();
-    const entry = rateLimiter.get(ip) || { count: 0, timestamp: now };
-    if (now - entry.timestamp > 60000) { // Reset every minute
-        rateLimiter.set(ip, { count: 1, timestamp: now });
-        return true;
-    }
-    entry.count++;
-    rateLimiter.set(ip, entry);
-    if (entry.count > 200) { // Limit to 200 requests per minute per IP
-        log(`Rate limit exceeded for IP: ${ip}`, 'warn');
-        return false;
-    }
-    return true;
-}
-
-async function handleAdminRequest(request, env) {
+// **FIX:** Added `ctx` parameter to ensure database operations complete.
+async function handleAdminRequest(request, env, ctx) {
     const url = new URL(request.url);
     const { pathname } = url;
     const jsonHeader = { 'Content-Type': 'application/json' };
@@ -613,7 +585,6 @@ async function handleAdminRequest(request, env) {
             return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: jsonHeader });
         }
 
-        // CSRF and Origin check for all mutating methods
         if (request.method !== 'GET') {
             const receivedCsrfToken = request.headers.get('X-CSRF-Token');
             const storedCsrfToken = await env.USER_KV.get('csrf_token');
@@ -627,59 +598,79 @@ async function handleAdminRequest(request, env) {
         }
         
         try {
-            // GET /admin/api/stats
             if (pathname === '/admin/api/stats' && request.method === 'GET') {
                 return new Response(JSON.stringify(await fetchDashboardStats(env)), { status: 200, headers: jsonHeader });
             }
 
-            // GET & POST /admin/api/users
             if (pathname === '/admin/api/users') {
                 if (request.method === 'GET') {
                     const { results } = await env.DB.prepare("SELECT * FROM users ORDER BY created_at DESC").all();
                     return new Response(JSON.stringify(results ?? []), { status: 200, headers: jsonHeader });
                 }
                 if (request.method === 'POST') {
-                    // **FIX:** Use field names that match the database columns.
                     const { uuid, expiration_date, expiration_time, data_limit, notes } = await request.json();
                     if (!isValidUUID(uuid) || !expiration_date || !expiration_time || data_limit === undefined) {
                          throw new Error('Invalid or missing fields. UUID, date, time, and data_limit are required.');
                     }
-                    await env.DB.prepare("INSERT INTO users (uuid, expiration_date, expiration_time, data_limit, notes) VALUES (?, ?, ?, ?, ?)")
-                        .bind(uuid, expiration_date, expiration_time, data_limit ?? 0, notes || null).run();
+                    
+                    const dbPromise = env.DB.prepare("INSERT INTO users (uuid, expiration_date, expiration_time, data_limit, notes) VALUES (?, ?, ?, ?, ?)")
+                        .bind(uuid, expiration_date, expiration_time, data_limit ?? 0, notes || null)
+                        .run();
+                    
+                    // **FIX:** Use ctx.waitUntil to ensure the async database operation completes.
+                    ctx.waitUntil(dbPromise);
+                    await dbPromise; // Also wait for the result before responding to the client.
+
                     return new Response(JSON.stringify({ success: true, uuid }), { status: 201, headers: jsonHeader });
                 }
             }
 
-            // POST /admin/api/users/bulk-delete
             if (pathname === '/admin/api/users/bulk-delete' && request.method === 'POST') {
                  const { uuids } = await request.json();
                  if (!Array.isArray(uuids) || uuids.length === 0) throw new Error('UUIDs array is required.');
                  const validUuids = uuids.filter(isValidUUID);
-                 await env.DB.batch(validUuids.map(uuid => env.DB.prepare("DELETE FROM users WHERE uuid = ?").bind(uuid)));
-                 await Promise.all(validUuids.map(uuid => env.USER_KV.delete(`user:${uuid}`)));
+                 
+                 const deletePromises = validUuids.map(uuid => env.DB.prepare("DELETE FROM users WHERE uuid = ?").bind(uuid));
+                 const kvPromises = validUuids.map(uuid => env.USER_KV.delete(`user:${uuid}`));
+
+                 const dbPromise = env.DB.batch(deletePromises);
+                 
+                 // **FIX:** Use ctx.waitUntil to ensure all operations complete.
+                 ctx.waitUntil(Promise.all([dbPromise, ...kvPromises]));
+                 await dbPromise;
+
                  return new Response(JSON.stringify({ success: true, count: validUuids.length }), { status: 200, headers: jsonHeader });
             }
             
-            // PUT & DELETE /admin/api/users/:uuid
             const userRouteMatch = pathname.match(/^\/admin\/api\/users\/([a-f0-9-]+)$/);
             if (userRouteMatch) {
                 const uuid = userRouteMatch[1];
                 if (!isValidUUID(uuid)) return new Response(JSON.stringify({ error: 'Invalid UUID format' }), { status: 400, headers: jsonHeader });
                 
                 if (request.method === 'PUT') {
-                    // **FIX:** Use field names that match the database columns.
                     const { expiration_date, expiration_time, data_limit, notes, reset_traffic } = await request.json();
                     if (!expiration_date || !expiration_time || data_limit === undefined) throw new Error('Invalid or missing fields. Date, time, and data_limit are required.');
                     
                     let query = "UPDATE users SET expiration_date = ?, expiration_time = ?, data_limit = ?, notes = ?" + (reset_traffic ? ", used_traffic = 0" : "") + " WHERE uuid = ?";
-                    await env.DB.prepare(query).bind(expiration_date, expiration_time, data_limit ?? 0, notes || null, uuid).run();
+                    const dbPromise = env.DB.prepare(query)
+                        .bind(expiration_date, expiration_time, data_limit ?? 0, notes || null, uuid)
+                        .run();
+                    const kvPromise = env.USER_KV.delete(`user:${uuid}`);
+
+                    // **FIX:** Use ctx.waitUntil to ensure all operations complete.
+                    ctx.waitUntil(Promise.all([dbPromise, kvPromise]));
+                    await dbPromise;
                     
-                    await env.USER_KV.delete(`user:${uuid}`); // Invalidate cache
                     return new Response(JSON.stringify({ success: true, uuid }), { status: 200, headers: jsonHeader });
                 }
                 if (request.method === 'DELETE') {
-                    await env.DB.prepare("DELETE FROM users WHERE uuid = ?").bind(uuid).run();
-                    await env.USER_KV.delete(`user:${uuid}`);
+                    const dbPromise = env.DB.prepare("DELETE FROM users WHERE uuid = ?").bind(uuid).run();
+                    const kvPromise = env.USER_KV.delete(`user:${uuid}`);
+                    
+                    // **FIX:** Use ctx.waitUntil to ensure all operations complete.
+                    ctx.waitUntil(Promise.all([dbPromise, kvPromise]));
+                    await dbPromise;
+
                     return new Response(null, { status: 204 });
                 }
             }
@@ -700,7 +691,7 @@ async function handleAdminRequest(request, env) {
                 const sessionToken = crypto.randomUUID();
                 const csrfToken = crypto.randomUUID();
                 await Promise.all([
-                    env.USER_KV.put('admin_session_token', sessionToken, { expirationTtl: 86400 }), // 24h session
+                    env.USER_KV.put('admin_session_token', sessionToken, { expirationTtl: 86400 }),
                     env.USER_KV.put('csrf_token', csrfToken, { expirationTtl: 86400 })
                 ]);
                 return new Response(null, { status: 302, headers: { 'Location': '/admin', 'Set-Cookie': `auth_token=${sessionToken}; HttpOnly; Secure; Path=/admin; Max-Age=86400; SameSite=Strict` } });
@@ -915,7 +906,6 @@ async function vlessOverWSHandler(request, env, ctx) {
             }
         })
     ).catch(err => {
-        // This will catch errors from the WritableStream's write/abort methods.
         log(`Unhandled pipeline failure: ${err.message}`, 'error');
         closeConnection();
     });
@@ -994,17 +984,15 @@ export default {
         try {
             const url = new URL(request.url);
 
-            // Admin panel requests are handled first.
             if (url.pathname.startsWith('/admin')) {
-                return handleAdminRequest(request, env);
+                // **FIX:** Pass the execution context `ctx` to the admin handler.
+                return handleAdminRequest(request, env, ctx);
             }
 
-            // WebSocket upgrade for VLESS connections.
             if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
                 return await vlessOverWSHandler(request, env, ctx);
             }
 
-            // Subscription link handling.
             const handleSubscription = async (core) => {
                 const uuid = url.pathname.slice(`/${core}/`.length);
                 const userData = await getUserData(env, uuid);
@@ -1017,7 +1005,6 @@ export default {
             if (url.pathname.startsWith('/xray/')) return handleSubscription('xray');
             if (url.pathname.startsWith('/sb/')) return handleSubscription('sb');
 
-            // User config page.
             const path = url.pathname.slice(1);
             if (isValidUUID(path)) {
                 const userData = await getUserData(env, path);
@@ -1028,8 +1015,6 @@ export default {
                 return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', ...CONST.securityHeaders } });
             }
 
-            // **INTELLIGENT ROOT PROXY**
-            // Only proxy if ROOT_PROXY_URL is set AND the user is accessing the root path ('/').
             if (env.ROOT_PROXY_URL && url.pathname === '/') {
                 try {
                     const proxyUrl = new URL(env.ROOT_PROXY_URL);
@@ -1041,7 +1026,6 @@ export default {
                 }
             }
 
-            // If no routes match, return 404.
             return new Response('Not Found', { status: 404 });
         } catch (err) {
             log(`Global fetch error: ${err.stack}`, 'error');
