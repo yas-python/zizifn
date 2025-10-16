@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Cloudflare Worker VLESS - Ultimate Final Edition
  *
