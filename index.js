@@ -1,10 +1,11 @@
 /**
  * Cloudflare Worker VLESS - Ultimate Edition (Corrected & Improved by Gemini)
  *
- * @version 3.2.0
- * @description This version fixes the non-functional "Create User" button by correctly implementing CSRF token injection.
- * It combines a feature-rich admin panel with traffic management and a professional user configuration page.
- * It leverages Cloudflare D1 for persistent user data, KV for caching, and provides a robust VLESS-over-WebSocket proxy.
+ * @version 3.3.0
+ * @description This version intelligently handles ROOT_PROXY_URL to prevent conflicts with the admin panel API,
+ * ensuring both features can coexist without errors. It combines a feature-rich admin panel with traffic management
+ * and a professional user configuration page. It leverages Cloudflare D1 for persistent user data, KV for caching,
+ * and provides a robust VLESS-over-WebSocket proxy.
  *
  * --- SETUP INSTRUCTIONS ---
  * 1. D1 Database: Create a D1 database and run the schema below.
@@ -29,10 +30,10 @@
  * binding = "USER_KV"
  * id = "your-kv-namespace-id"
  *
- * 4. Secrets (Set in Worker settings):
+ * 4. Secrets (Set in Worker/Pages settings):
  * - ADMIN_KEY: A strong password for the admin panel.
  * - PROXYIP (Optional): A specific clean IP for proxying configs.
- * - ROOT_PROXY_URL (Optional): URL to reverse proxy on the root path.
+ * - ROOT_PROXY_URL (Optional): URL to reverse proxy ONLY on the root path ('/').
  */
 
 import { connect } from 'cloudflare:sockets';
@@ -688,7 +689,6 @@ async function handleAdminRequest(request, env) {
         if (request.method === 'GET') {
             if (await isAdmin(request, env)) {
                 const csrfToken = await env.USER_KV.get('csrf_token') || crypto.randomUUID();
-                // **FIX:** Correctly inject the real CSRF token into the script.
                 const scriptString = `(${getAdminPanelScript.toString()})("${csrfToken}");`;
                 const finalAdminPanelHTML = adminPanelHTML.replace('/* SCRIPT_PLACEHOLDER */', scriptString);
                 return new Response(finalAdminPanelHTML, { headers: htmlHeader });
@@ -973,14 +973,17 @@ export default {
         try {
             const url = new URL(request.url);
 
+            // Admin panel requests are handled first.
             if (url.pathname.startsWith('/admin')) {
                 return handleAdminRequest(request, env);
             }
 
+            // WebSocket upgrade for VLESS connections.
             if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
                 return await vlessOverWSHandler(request, env, ctx);
             }
 
+            // Subscription link handling.
             const handleSubscription = async (core) => {
                 const uuid = url.pathname.slice(`/${core}/`.length);
                 const userData = await getUserData(env, uuid);
@@ -993,6 +996,7 @@ export default {
             if (url.pathname.startsWith('/xray/')) return handleSubscription('xray');
             if (url.pathname.startsWith('/sb/')) return handleSubscription('sb');
 
+            // User config page.
             const path = url.pathname.slice(1);
             if (isValidUUID(path)) {
                 const userData = await getUserData(env, path);
@@ -1003,13 +1007,12 @@ export default {
                 return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', ...CONST.securityHeaders } });
             }
 
-            if (env.ROOT_PROXY_URL) {
+            // **INTELLIGENT ROOT PROXY**
+            // Only proxy if ROOT_PROXY_URL is set AND the user is accessing the root path ('/').
+            if (env.ROOT_PROXY_URL && url.pathname === '/') {
                 try {
                     const proxyUrl = new URL(env.ROOT_PROXY_URL);
-                    url.hostname = proxyUrl.hostname;
-                    url.protocol = proxyUrl.protocol;
-                    url.port = proxyUrl.port;
-                    let newRequest = new Request(url, request);
+                    let newRequest = new Request(proxyUrl, request);
                     newRequest.headers.set('Host', proxyUrl.hostname);
                     return fetch(newRequest);
                 } catch (e) {
@@ -1017,6 +1020,7 @@ export default {
                 }
             }
 
+            // If no routes match, return 404.
             return new Response('Not Found', { status: 404 });
         } catch (err) {
             log(`Global fetch error: ${err.stack}`, 'error');
