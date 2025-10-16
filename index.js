@@ -1,11 +1,11 @@
 /**
- * Cloudflare Worker VLESS - Ultimate Edition
+ * Cloudflare Worker VLESS - Ultimate Final Edition
  *
- * @version 3.1.0
- * @description Fixes the "Chart is not defined" error by updating the Content Security Policy (CSP).
- * This script combines a feature-rich admin panel with traffic management and a beautiful,
- * professional user configuration page. It leverages Cloudflare D1 for persistent user data,
- * KV for caching sessions, and provides a robust VLESS-over-WebSocket proxy.
+ * @version 3.2.0
+ * @description This is the complete and fixed version. It resolves the "Create User" button functionality,
+ * correctly handles data limits, and ensures all admin panel features work as intended.
+ * This script combines a feature-rich admin panel with traffic management and a professional user configuration page.
+ * It leverages Cloudflare D1 for persistent user data and KV for caching.
  *
  * --- SETUP INSTRUCTIONS ---
  * 1. D1 Database: Create a D1 database and run the schema below.
@@ -30,7 +30,7 @@
  * binding = "USER_KV"
  * id = "your-kv-namespace-id"
  *
- * 4. Secrets (Set in Worker settings):
+ * 4. Secrets (Set in Worker settings -> Variables -> "Encrypt" for production):
  * - ADMIN_KEY: A strong password for the admin panel.
  * - PROXYIP (Optional): A specific clean IP for proxying configs.
  * - ROOT_PROXY_URL (Optional): URL to reverse proxy on the root path.
@@ -41,7 +41,7 @@ import { connect } from 'cloudflare:sockets';
 // --- Configuration & Constants ---
 
 const Config = {
-    proxyIPs: [''],
+    proxyIPs: [''], // Can be left empty if using PROXYIP secret
     fromEnv(env) {
         const selectedProxyIP = env.PROXYIP || this.proxyIPs[Math.floor(Math.random() * this.proxyIPs.length)];
         return { proxyAddress: selectedProxyIP };
@@ -52,7 +52,6 @@ const CONST = {
     VLESS_VERSION: new Uint8Array([0]),
     WS_READY_STATE_OPEN: 1,
     securityHeaders: {
-        // FIXED: Added https://cdn.jsdelivr.net to script-src to allow Chart.js to load.
         'Content-Security-Policy': "default-src 'self' https://cdnjs.cloudflare.com https://fonts.googleapis.com https://fonts.gstatic.com https://flagcdn.com https://ip-api.io; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; object-src 'none'; base-uri 'self'; form-action 'self';",
         'X-Content-Type-Options': 'nosniff',
         'X-Frame-Options': 'DENY',
@@ -100,7 +99,7 @@ async function getUserData(env, uuid) {
     query.data_limit = Number(query.data_limit || 0);
     query.used_traffic = Number(query.used_traffic || 0);
     const isStillValid = isUserValid(query);
-    const expirationTtl = isStillValid ? 3600 : 300;
+    const expirationTtl = isStillValid ? 3600 : 300; // Cache valid users longer
     await env.USER_KV.put(cacheKey, JSON.stringify(query), { expirationTtl });
     return query;
   } catch (e) {
@@ -112,9 +111,11 @@ async function getUserData(env, uuid) {
 async function updateUsedTraffic(env, uuid, additionalTraffic) {
   if (additionalTraffic <= 0 || !isValidUUID(uuid)) return;
   try {
+    // Atomically update the traffic in the database
     await env.DB.prepare("UPDATE users SET used_traffic = used_traffic + ? WHERE uuid = ?")
       .bind(additionalTraffic, uuid)
       .run();
+    // Invalidate the cache for this user so the next request gets fresh data
     await env.USER_KV.delete(`user:${uuid}`);
     log(`Updated traffic for ${uuid} by ${additionalTraffic} bytes.`);
   } catch (error) {
@@ -126,7 +127,7 @@ async function fetchDashboardStats(env) {
     const query = `
         SELECT
             COUNT(*) as totalUsers,
-            SUM(CASE WHEN (expiration_date > date('now') OR (expiration_date = date('now') AND expiration_time > time('now'))) AND (data_limit = 0 OR used_traffic < data_limit) THEN 1 ELSE 0 END) as activeUsers,
+            SUM(CASE WHEN (expiration_date > date('now') OR (expiration_date = date('now') AND expiration_time > time('now', 'localtime'))) AND (data_limit = 0 OR used_traffic < data_limit) THEN 1 ELSE 0 END) as activeUsers,
             SUM(used_traffic) as totalTraffic
         FROM users
     `;
@@ -142,6 +143,7 @@ async function fetchDashboardStats(env) {
 async function cleanupExpiredUsers(env) {
     log('Starting scheduled cleanup of expired users...');
     try {
+        // Delete users expired more than a month ago to avoid deleting recently expired users
         const oneMonthAgo = new Date();
         oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
         const dateString = oneMonthAgo.toISOString().split('T')[0];
@@ -158,6 +160,7 @@ async function cleanupExpiredUsers(env) {
 
 const adminLoginHTML = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Admin Login</title><style>body{display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background-color:#121212;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}.login-container{background-color:#1e1e1e;padding:40px;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.5);text-align:center;width:320px;border:1px solid #333}h1{color:#fff;margin-bottom:24px;font-weight:500}form{display:flex;flex-direction:column}input[type=password]{background-color:#2c2c2c;border:1px solid #444;color:#fff;padding:12px;border-radius:8px;margin-bottom:20px;font-size:16px}input[type=password]:focus{outline:0;border-color:#007aff;box-shadow:0 0 0 2px rgba(0,122,255,.3)}button{background-color:#007aff;color:#fff;border:0;padding:12px;border-radius:8px;font-size:16px;font-weight:600;cursor:pointer;transition:background-color .2s}button:hover{background-color:#005ecb}.error{color:#ff3b30;margin-top:15px;font-size:14px}</style></head><body><div class="login-container"><h1>Admin Login</h1><form method="POST" action="/admin"><input type="password" name="password" placeholder="••••••••••••••" required><button type="submit">Login</button></form></div></body></html>`;
 
+// FIXED AND COMPLETE ADMIN PANEL SCRIPT
 function getAdminPanelScript() {
     document.addEventListener('DOMContentLoaded', () => {
         const API_BASE = '/admin/api';
@@ -287,7 +290,7 @@ function getAdminPanelScript() {
             const numValue = parseFloat(value) || 0;
             if (numValue === 0) return 0;
             const units = { 'KB': 1024, 'MB': 1024 ** 2, 'GB': 1024 ** 3, 'TB': 1024 ** 4 };
-            return numValue * (units[unit] || 0);
+            return Math.round(numValue * (units[unit] || 0));
         }
 
         function setUnlimited(isEdit = false) {
@@ -298,7 +301,9 @@ function getAdminPanelScript() {
 
         function getDataLimitFromInputs(isEdit = false) {
             const prefix = isEdit ? 'edit' : '';
-            return getDataLimitInBytes(document.getElementById(`${prefix}DataLimitValue`).value, document.getElementById(`${prefix}DataLimitUnit`).value);
+            const value = document.getElementById(`${prefix}DataLimitValue`).value;
+            const unit = document.getElementById(`${prefix}DataLimitUnit`).value;
+            return getDataLimitInBytes(value, unit);
         }
 
         function setDataLimitInputs(dataLimit, isEdit = false) {
@@ -337,11 +342,11 @@ function getAdminPanelScript() {
                 },
                 options: {
                     responsive: true, maintainAspectRatio: false,
-                    plugins: { legend: { display: true }, title: { display: true, text: 'User and Traffic Overview' } },
+                    plugins: { legend: { display: true, labels: { color: style.getPropertyValue('--text-primary') } }, title: { display: true, text: 'User and Traffic Overview', color: style.getPropertyValue('--text-primary') } },
                     scales: {
-                        x: { stacked: true },
-                        y: { type: 'linear', display: true, position: 'left', stacked: true, title: { display: true, text: 'User Count' }, beginAtZero: true },
-                        yTraffic: { type: 'linear', display: true, position: 'right', title: { display: true, text: 'Traffic (GB)' }, grid: { drawOnChartArea: false }, beginAtZero: true }
+                        x: { stacked: true, ticks: { color: style.getPropertyValue('--text-secondary') }, grid: { color: style.getPropertyValue('--border') } },
+                        y: { type: 'linear', display: true, position: 'left', stacked: true, title: { display: true, text: 'User Count', color: style.getPropertyValue('--text-secondary') }, beginAtZero: true, ticks: { color: style.getPropertyValue('--text-secondary') }, grid: { color: style.getPropertyValue('--border') } },
+                        yTraffic: { type: 'linear', display: true, position: 'right', title: { display: true, text: 'Traffic (GB)', color: style.getPropertyValue('--text-secondary') }, grid: { drawOnChartArea: false }, beginAtZero: true, ticks: { color: style.getPropertyValue('--text-secondary') } }
                     }
                 }
             });
@@ -525,7 +530,7 @@ function getAdminPanelScript() {
         setDefaultExpiry();
         uuidInput.value = crypto.randomUUID();
         fetchAndRenderAll();
-        setInterval(fetchAndRenderAll, 60000);
+        setInterval(fetchAndRenderAll, 60000); // Auto-refresh data every minute
     });
 }
 
@@ -544,13 +549,13 @@ const rateLimiter = new Map();
 function checkRateLimit(ip) {
     const now = Date.now();
     const entry = rateLimiter.get(ip) || { count: 0, timestamp: now };
-    if (now - entry.timestamp > 60000) {
+    if (now - entry.timestamp > 60000) { // Reset count every minute
         entry.count = 0;
         entry.timestamp = now;
     }
     entry.count++;
     rateLimiter.set(ip, entry);
-    if (entry.count > 200) {
+    if (entry.count > 200) { // Limit to 200 requests per minute per IP
         log(`Rate limit exceeded for IP: ${ip}`, 'warn');
         return false;
     }
@@ -654,7 +659,7 @@ async function handleAdminRequest(request, env) {
                 const sessionToken = crypto.randomUUID();
                 const csrfToken = crypto.randomUUID();
                 await Promise.all([
-                    env.USER_KV.put('admin_session_token', sessionToken, { expirationTtl: 86400 }),
+                    env.USER_KV.put('admin_session_token', sessionToken, { expirationTtl: 86400 }), // 24h session
                     env.USER_KV.put('csrf_token', csrfToken, { expirationTtl: 86400 })
                 ]);
                 return new Response(null, { status: 302, headers: { 'Location': '/admin', 'Set-Cookie': `auth_token=${sessionToken}; HttpOnly; Secure; Path=/admin; Max-Age=86400; SameSite=Strict` } });
@@ -664,8 +669,9 @@ async function handleAdminRequest(request, env) {
         if (request.method === 'GET') {
             if (await isAdmin(request, env)) {
                 const csrfToken = await env.USER_KV.get('csrf_token') || crypto.randomUUID();
-                const scriptString = getAdminPanelScript.toString().replace('"CSRF_TOKEN_PLACEHOLDER"', `"${csrfToken}"`);
-                const finalAdminPanelHTML = adminPanelHTML.replace('/* SCRIPT_PLACEHOLDER */', `(${scriptString})()`);
+                // Correctly inject the script and the CSRF token
+                const scriptString = `(${getAdminPanelScript.toString()})()`.replace('"CSRF_TOKEN_PLACEHOLDER"', `"${csrfToken}"`);
+                const finalAdminPanelHTML = adminPanelHTML.replace('/* SCRIPT_PLACEHOLDER */', scriptString);
                 return new Response(finalAdminPanelHTML, { headers: htmlHeader });
             }
             return new Response(adminLoginHTML, { headers: htmlHeader });
@@ -842,13 +848,14 @@ async function processVlessHeader(vlessBuffer, env) {
     if (view.getUint8(0) !== 0) throw new Error(`Invalid VLESS version: ${view.getUint8(0)}`);
     const uuid = unsafeStringify(new Uint8Array(vlessBuffer.slice(1, 17)));
     
-    if (!isUserValid(await getUserData(env, uuid))) {
+    const userData = await getUserData(env, uuid);
+    if (!isUserValid(userData)) {
         throw new Error('User is invalid, expired, or has reached their data limit');
     }
 
     const optLen = view.getUint8(17);
     const command = view.getUint8(18 + optLen);
-    if(command === 2) throw new Error('UDP is not supported.');
+    if(command === 2) throw new Error('UDP is not supported.'); // Block UDP requests
 
     const port = view.getUint16(19 + optLen);
     let addressIndex = 21 + optLen;
@@ -933,13 +940,17 @@ export default {
             }
 
             if (env.ROOT_PROXY_URL) {
-                const proxyUrl = new URL(env.ROOT_PROXY_URL);
-                url.hostname = proxyUrl.hostname;
-                url.protocol = proxyUrl.protocol;
-                url.port = proxyUrl.port;
-                let newRequest = new Request(url, request);
-                newRequest.headers.set('Host', proxyUrl.hostname);
-                return fetch(newRequest);
+                try {
+                    const proxyUrl = new URL(env.ROOT_PROXY_URL);
+                    url.hostname = proxyUrl.hostname;
+                    url.protocol = proxyUrl.protocol;
+                    url.port = proxyUrl.port;
+                    let newRequest = new Request(url, request);
+                    newRequest.headers.set('Host', proxyUrl.hostname);
+                    return await fetch(newRequest);
+                } catch (e) {
+                    return new Response(`Reverse proxy configuration error: ${e.message}`, { status: 502 });
+                }
             }
 
             return new Response('Not Found', { status: 404 });
