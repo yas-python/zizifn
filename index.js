@@ -1,12 +1,10 @@
-// @ts-nocheck
 /**
- * Cloudflare Worker VLESS - Ultimate Final Edition
+ * Cloudflare Worker VLESS - Ultimate Edition (Corrected & Improved by Gemini)
  *
  * @version 3.2.0
- * @description This is the complete and fixed version. It resolves the "Create User" button functionality,
- * correctly handles data limits, and ensures all admin panel features work as intended.
- * This script combines a feature-rich admin panel with traffic management and a professional user configuration page.
- * It leverages Cloudflare D1 for persistent user data and KV for caching.
+ * @description This version fixes the non-functional "Create User" button by correctly implementing CSRF token injection.
+ * It combines a feature-rich admin panel with traffic management and a professional user configuration page.
+ * It leverages Cloudflare D1 for persistent user data, KV for caching, and provides a robust VLESS-over-WebSocket proxy.
  *
  * --- SETUP INSTRUCTIONS ---
  * 1. D1 Database: Create a D1 database and run the schema below.
@@ -31,7 +29,7 @@
  * binding = "USER_KV"
  * id = "your-kv-namespace-id"
  *
- * 4. Secrets (Set in Worker settings -> Variables -> "Encrypt" for production):
+ * 4. Secrets (Set in Worker settings):
  * - ADMIN_KEY: A strong password for the admin panel.
  * - PROXYIP (Optional): A specific clean IP for proxying configs.
  * - ROOT_PROXY_URL (Optional): URL to reverse proxy on the root path.
@@ -42,7 +40,7 @@ import { connect } from 'cloudflare:sockets';
 // --- Configuration & Constants ---
 
 const Config = {
-    proxyIPs: [''], // Can be left empty if using PROXYIP secret
+    proxyIPs: [''], // Can be populated with default clean IPs if needed
     fromEnv(env) {
         const selectedProxyIP = env.PROXYIP || this.proxyIPs[Math.floor(Math.random() * this.proxyIPs.length)];
         return { proxyAddress: selectedProxyIP };
@@ -53,13 +51,14 @@ const CONST = {
     VLESS_VERSION: new Uint8Array([0]),
     WS_READY_STATE_OPEN: 1,
     securityHeaders: {
-        'Content-Security-Policy': "default-src 'self' https://cdnjs.cloudflare.com https://fonts.googleapis.com https://fonts.gstatic.com https://flagcdn.com https://ip-api.io; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; object-src 'none'; base-uri 'self'; form-action 'self';",
+        'Content-Security-Policy': "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; img-src 'self' data: https://flagcdn.com; connect-src 'self' https://ip-api.io https://dns.google; object-src 'none'; base-uri 'self'; form-action 'self';",
         'X-Content-Type-Options': 'nosniff',
         'X-Frame-Options': 'DENY',
         'Referrer-Policy': 'no-referrer',
         'Strict-Transport-Security': 'max-age=31536000; includeSubDomains; preload'
     }
 };
+
 
 // --- Core Helper Functions ---
 
@@ -82,27 +81,39 @@ function isTimeValid(expDate, expTime) {
 
 function isUserValid(userData) {
     if (!userData) return false;
-    const timeOK = isTimeValid(userData.exp_date, userData.exp_time);
-    const trafficOK = (userData.data_limit === 0) || ((userData.used_traffic || 0) < userData.data_limit);
+    const timeOK = isTimeValid(userData.expiration_date, userData.expiration_time);
+    const trafficOK = (userData.data_limit === 0) || ((userData.used_traffic ?? 0) < userData.data_limit);
     return timeOK && trafficOK;
 }
 
 async function getUserData(env, uuid) {
   if (!isValidUUID(uuid)) return null;
   const cacheKey = `user:${uuid}`;
-  let userData = await env.USER_KV.get(cacheKey, 'json');
-  if (userData) {
-      return userData;
+  
+  try {
+    let userData = await env.USER_KV.get(cacheKey, 'json');
+    if (userData) {
+        return userData;
+    }
+  } catch (e) {
+      log(`KV parsing error for ${uuid}: ${e.message}`, 'warn');
   }
+
   try {
     const query = await env.DB.prepare("SELECT * FROM users WHERE uuid = ?").bind(uuid).first();
     if (!query) return null;
-    query.data_limit = Number(query.data_limit || 0);
-    query.used_traffic = Number(query.used_traffic || 0);
-    const isStillValid = isUserValid(query);
-    const expirationTtl = isStillValid ? 3600 : 300; // Cache valid users longer
-    await env.USER_KV.put(cacheKey, JSON.stringify(query), { expirationTtl });
-    return query;
+
+    const userData = {
+        ...query,
+        data_limit: Number(query.data_limit ?? 0),
+        used_traffic: Number(query.used_traffic ?? 0)
+    };
+    
+    const isStillValid = isUserValid(userData);
+    const expirationTtl = isStillValid ? 3600 : 300; // Cache valid users for 1 hour, invalid for 5 minutes
+    await env.USER_KV.put(cacheKey, JSON.stringify(userData), { expirationTtl });
+    
+    return userData;
   } catch (e) {
       log(`Database error fetching user ${uuid}: ${e.message}`, 'error');
       return null;
@@ -112,12 +123,10 @@ async function getUserData(env, uuid) {
 async function updateUsedTraffic(env, uuid, additionalTraffic) {
   if (additionalTraffic <= 0 || !isValidUUID(uuid)) return;
   try {
-    // Atomically update the traffic in the database
     await env.DB.prepare("UPDATE users SET used_traffic = used_traffic + ? WHERE uuid = ?")
       .bind(additionalTraffic, uuid)
       .run();
-    // Invalidate the cache for this user so the next request gets fresh data
-    await env.USER_KV.delete(`user:${uuid}`);
+    await env.USER_KV.delete(`user:${uuid}`); // Invalidate cache after update
     log(`Updated traffic for ${uuid} by ${additionalTraffic} bytes.`);
   } catch (error) {
     log(`Failed to update traffic for ${uuid}: ${error.message}`, 'error');
@@ -128,28 +137,31 @@ async function fetchDashboardStats(env) {
     const query = `
         SELECT
             COUNT(*) as totalUsers,
-            SUM(CASE WHEN (expiration_date > date('now') OR (expiration_date = date('now') AND expiration_time > time('now', 'localtime'))) AND (data_limit = 0 OR used_traffic < data_limit) THEN 1 ELSE 0 END) as activeUsers,
+            SUM(CASE WHEN (expiration_date > date('now') OR (expiration_date = date('now') AND expiration_time > time('now'))) AND (data_limit = 0 OR used_traffic < data_limit) THEN 1 ELSE 0 END) as activeUsers,
             SUM(used_traffic) as totalTraffic
         FROM users
     `;
     const stats = await env.DB.prepare(query).first();
+    const totalUsers = Number(stats.totalUsers ?? 0);
+    const activeUsers = Number(stats.activeUsers ?? 0);
     return {
-        totalUsers: Number(stats.totalUsers || 0),
-        activeUsers: Number(stats.activeUsers || 0),
-        expiredUsers: Number(stats.totalUsers || 0) - Number(stats.activeUsers || 0),
-        totalTraffic: Number(stats.totalTraffic || 0)
+        totalUsers,
+        activeUsers,
+        expiredUsers: totalUsers - activeUsers,
+        totalTraffic: Number(stats.totalTraffic ?? 0)
     };
 }
 
 async function cleanupExpiredUsers(env) {
     log('Starting scheduled cleanup of expired users...');
     try {
-        // Delete users expired more than a month ago to avoid deleting recently expired users
         const oneMonthAgo = new Date();
         oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
         const dateString = oneMonthAgo.toISOString().split('T')[0];
+        
         const stmt = env.DB.prepare("DELETE FROM users WHERE expiration_date < ?");
         const { count } = await stmt.bind(dateString).run();
+        
         if (count > 0) log(`Successfully pruned ${count} old expired users.`);
         else log('No old expired users to prune.');
     } catch (e) {
@@ -157,12 +169,12 @@ async function cleanupExpiredUsers(env) {
     }
 }
 
+
 // --- Admin Panel Logic ---
 
 const adminLoginHTML = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Admin Login</title><style>body{display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background-color:#121212;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}.login-container{background-color:#1e1e1e;padding:40px;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.5);text-align:center;width:320px;border:1px solid #333}h1{color:#fff;margin-bottom:24px;font-weight:500}form{display:flex;flex-direction:column}input[type=password]{background-color:#2c2c2c;border:1px solid #444;color:#fff;padding:12px;border-radius:8px;margin-bottom:20px;font-size:16px}input[type=password]:focus{outline:0;border-color:#007aff;box-shadow:0 0 0 2px rgba(0,122,255,.3)}button{background-color:#007aff;color:#fff;border:0;padding:12px;border-radius:8px;font-size:16px;font-weight:600;cursor:pointer;transition:background-color .2s}button:hover{background-color:#005ecb}.error{color:#ff3b30;margin-top:15px;font-size:14px}</style></head><body><div class="login-container"><h1>Admin Login</h1><form method="POST" action="/admin"><input type="password" name="password" placeholder="••••••••••••••" required><button type="submit">Login</button></form></div></body></html>`;
 
-// FIXED AND COMPLETE ADMIN PANEL SCRIPT
-function getAdminPanelScript() {
+function getAdminPanelScript(csrfToken) {
     document.addEventListener('DOMContentLoaded', () => {
         const API_BASE = '/admin/api';
         let allUsers = [];
@@ -181,7 +193,6 @@ function getAdminPanelScript() {
         const pageSize = 10;
         let searchDebounceTimer;
         let chartInstance = null;
-        let csrfToken = "CSRF_TOKEN_PLACEHOLDER";
 
         function showToast(message, isError = false) {
             toast.textContent = message;
@@ -279,7 +290,7 @@ function getAdminPanelScript() {
         }
 
         function formatBytes(bytes, decimals = 2) {
-            if (!bytes || bytes === 0) return '0 Bytes';
+            if (bytes === null || typeof bytes === 'undefined' || bytes === 0) return '0 Bytes';
             const k = 1024;
             const dm = decimals < 0 ? 0 : decimals;
             const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
@@ -302,9 +313,7 @@ function getAdminPanelScript() {
 
         function getDataLimitFromInputs(isEdit = false) {
             const prefix = isEdit ? 'edit' : '';
-            const value = document.getElementById(`${prefix}DataLimitValue`).value;
-            const unit = document.getElementById(`${prefix}DataLimitUnit`).value;
-            return getDataLimitInBytes(value, unit);
+            return getDataLimitInBytes(document.getElementById(`${prefix}DataLimitValue`).value, document.getElementById(`${prefix}DataLimitUnit`).value);
         }
 
         function setDataLimitInputs(dataLimit, isEdit = false) {
@@ -343,11 +352,11 @@ function getAdminPanelScript() {
                 },
                 options: {
                     responsive: true, maintainAspectRatio: false,
-                    plugins: { legend: { display: true, labels: { color: style.getPropertyValue('--text-primary') } }, title: { display: true, text: 'User and Traffic Overview', color: style.getPropertyValue('--text-primary') } },
+                    plugins: { legend: { display: true, labels: { color: 'white' } }, title: { display: true, text: 'User and Traffic Overview', color: 'white' } },
                     scales: {
-                        x: { stacked: true, ticks: { color: style.getPropertyValue('--text-secondary') }, grid: { color: style.getPropertyValue('--border') } },
-                        y: { type: 'linear', display: true, position: 'left', stacked: true, title: { display: true, text: 'User Count', color: style.getPropertyValue('--text-secondary') }, beginAtZero: true, ticks: { color: style.getPropertyValue('--text-secondary') }, grid: { color: style.getPropertyValue('--border') } },
-                        yTraffic: { type: 'linear', display: true, position: 'right', title: { display: true, text: 'Traffic (GB)', color: style.getPropertyValue('--text-secondary') }, grid: { drawOnChartArea: false }, beginAtZero: true, ticks: { color: style.getPropertyValue('--text-secondary') } }
+                        x: { stacked: true, ticks: { color: 'white' } },
+                        y: { type: 'linear', display: true, position: 'left', stacked: true, title: { display: true, text: 'User Count', color: 'white' }, beginAtZero: true, ticks: { color: 'white' } },
+                        yTraffic: { type: 'linear', display: true, position: 'right', title: { display: true, text: 'Traffic (GB)', color: 'white' }, grid: { drawOnChartArea: false }, beginAtZero: true, ticks: { color: 'white' } }
                     }
                 }
             });
@@ -360,13 +369,17 @@ function getAdminPanelScript() {
             userList.innerHTML = '';
             if (paginatedUsers.length === 0) {
                 userList.innerHTML = '<tr><td colspan="9" style="text-align:center;">No users found.</td></tr>';
+                renderPagination();
                 return;
             }
             paginatedUsers.forEach(user => {
                 const expiry = formatExpiryDateTime(user.expiration_date, user.expiration_time);
-                const dataLimit = user.data_limit || 0;
-                const usedTraffic = user.used_traffic || 0;
-                const isExpired = expiry.isExpired || (dataLimit > 0 && usedTraffic >= dataLimit);
+                const dataLimit = user.data_limit ?? 0;
+                const usedTraffic = user.used_traffic ?? 0;
+                const isExpiredByTime = expiry.isExpired;
+                const isExpiredByTraffic = dataLimit > 0 && usedTraffic >= dataLimit;
+                const isExpired = isExpiredByTime || isExpiredByTraffic;
+
                 const trafficText = dataLimit === 0 ? `${formatBytes(usedTraffic)} / ∞` : `${formatBytes(usedTraffic)} / ${formatBytes(dataLimit)}`;
                 const progressPercent = dataLimit === 0 ? 0 : Math.min((usedTraffic / dataLimit) * 100, 100);
                 let progressClass = progressPercent > 90 ? 'danger' : progressPercent > 70 ? 'warning' : '';
@@ -376,10 +389,6 @@ function getAdminPanelScript() {
                 row.innerHTML = `<td><input type="checkbox" class="userSelect" data-uuid="${user.uuid}"></td><td title="${user.uuid}">${user.uuid.substring(0, 8)}...</td><td>${new Date(user.created_at).toLocaleString()}</td><td title="${expiry.local}">${expiry.relative}</td><td title="Local Time: ${expiry.local}">${expiry.tehran}</td><td><span class="status-badge ${isExpired ? 'status-expired' : 'status-active'}">${isExpired ? 'Expired' : 'Active'}</span></td><td><div class="progress-bar-container"><div class="progress-bar ${progressClass}" style="width: ${progressPercent}%"></div></div><div class="traffic-text">${trafficText}</div></td><td title="${user.notes || ''}">${(user.notes || '-').substring(0, 20)}</td><td><div class="actions-cell"><button class="btn btn-secondary btn-edit" data-uuid="${user.uuid}">Edit</button><button class="btn btn-danger btn-delete" data-uuid="${user.uuid}">Delete</button></div></td>`;
                 userList.appendChild(row);
             });
-        }
-
-        function updateView() {
-            renderUsers();
             renderPagination();
         }
 
@@ -387,7 +396,7 @@ function getAdminPanelScript() {
             try {
                 const [users, stats] = await Promise.all([api.get('/users'), api.get('/stats')]);
                 allUsers = users.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-                handleSearch(true);
+                handleSearch(true); // This calls renderUsers and renderPagination
                 renderDashboardStats(stats);
             } catch (error) {
                 showToast(error.message, true);
@@ -469,9 +478,9 @@ function getAdminPanelScript() {
         function handleSearch(immediate = false) {
             const applyFilter = () => {
                 const searchTerm = searchInput.value.toLowerCase();
-                currentUsers = searchTerm ? allUsers.filter(user => user.uuid.toLowerCase().includes(searchTerm) || (user.notes || '').toLowerCase().includes(searchTerm)) : allUsers;
+                currentUsers = searchTerm ? allUsers.filter(user => user.uuid.toLowerCase().includes(searchTerm) || (user.notes || '').toLowerCase().includes(searchTerm)) : [...allUsers];
                 currentPage = 1;
-                updateView();
+                renderUsers();
             };
             clearTimeout(searchDebounceTimer);
             if (immediate) applyFilter();
@@ -484,7 +493,7 @@ function getAdminPanelScript() {
             const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
             const link = document.createElement('a');
             link.href = URL.createObjectURL(blob);
-            link.download = 'users_export.csv';
+            link.download = `users_export_${new Date().toISOString()}.csv`;
             link.click();
             URL.revokeObjectURL(link.href);
         }
@@ -496,14 +505,14 @@ function getAdminPanelScript() {
             const createBtn = (text, onClick, disabled) => {
                 const btn = document.createElement('button');
                 btn.classList.add('btn', 'btn-secondary');
-                btn.textContent = text;
+                btn.innerHTML = text;
                 btn.disabled = disabled;
                 btn.onclick = onClick;
                 return btn;
             };
-            pagination.appendChild(createBtn('Previous', () => { currentPage--; updateView(); }, currentPage === 1));
+            pagination.appendChild(createBtn('&laquo; Prev', () => { if(currentPage > 1) { currentPage--; renderUsers(); } }, currentPage === 1));
             pagination.appendChild(document.createElement('span')).textContent = `Page ${currentPage} of ${totalPages}`;
-            pagination.appendChild(createBtn('Next', () => { currentPage++; updateView(); }, currentPage === totalPages));
+            pagination.appendChild(createBtn('Next &raquo;', () => { if(currentPage < totalPages) { currentPage++; renderUsers(); } }, currentPage === totalPages));
         }
 
         // Event Listeners
@@ -531,11 +540,11 @@ function getAdminPanelScript() {
         setDefaultExpiry();
         uuidInput.value = crypto.randomUUID();
         fetchAndRenderAll();
-        setInterval(fetchAndRenderAll, 60000); // Auto-refresh data every minute
+        setInterval(fetchAndRenderAll, 60000); // Auto-refresh every 60 seconds
     });
 }
 
-const adminPanelHTML = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Admin Dashboard</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script><style>:root{--bg-main:#111827;--bg-card:#1F2937;--border:#374151;--text-primary:#F9FAFB;--text-secondary:#9CA3AF;--accent:#3B82F6;--accent-hover:#2563EB;--danger:#EF4444;--danger-hover:#DC2626;--success:#22C55E;--expired:#F59E0B;--btn-secondary-bg:#4B5563}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background-color:var(--bg-main);color:var(--text-primary);font-size:14px}.container{max-width:1200px;margin:40px auto;padding:0 20px}h1,h2{font-weight:600}h1{font-size:24px;margin-bottom:20px}h2{font-size:18px;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:20px}.card{background-color:var(--bg-card);border-radius:8px;padding:24px;border:1px solid var(--border);box-shadow:0 4px 6px rgba(0,0,0,.1)}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;align-items:flex-end}.form-group{display:flex;flex-direction:column}.form-group label{margin-bottom:8px;font-weight:500;color:var(--text-secondary)}.form-group .input-group{display:flex}input[type=text],input[type=date],input[type=time],input[type=number],select{width:100%;box-sizing:border-box;background-color:#374151;border:1px solid #4B5563;color:var(--text-primary);padding:10px;border-radius:6px;font-size:14px;transition:border-color .2s}input:focus{outline:0;border-color:var(--accent)}.label-note{font-size:11px;color:var(--text-secondary);margin-top:4px}.btn{padding:10px 16px;border:0;border-radius:6px;font-weight:600;cursor:pointer;transition:background-color .2s,transform .1s;display:inline-flex;align-items:center;justify-content:center;gap:8px}.btn:active{transform:scale(.98)}.btn-primary{background-color:var(--accent);color:#fff}.btn-primary:hover{background-color:var(--accent-hover)}.btn-secondary{background-color:var(--btn-secondary-bg);color:#fff}.btn-secondary:hover{background-color:#6B7280}.btn-danger{background-color:var(--danger);color:#fff}.btn-danger:hover{background-color:var(--danger-hover)}.input-group .btn-secondary{border-top-left-radius:0;border-bottom-left-radius:0}.input-group input{border-top-right-radius:0;border-bottom-right-radius:0;border-right:0}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{padding:12px 16px;text-align:left;border-bottom:1px solid var(--border);overflow:hidden;text-overflow:ellipsis}th{color:var(--text-secondary);font-weight:600;font-size:12px;text-transform:uppercase;white-space:nowrap}td{color:var(--text-primary);font-family:"SF Mono","Fira Code",monospace;vertical-align:middle}.status-badge{padding:4px 8px;border-radius:12px;font-size:12px;font-weight:600;display:inline-block}.status-active{background-color:var(--success);color:#064E3B}.status-expired{background-color:var(--expired);color:#78350F}.actions-cell .btn{padding:6px 10px;font-size:12px}#toast{position:fixed;top:20px;right:20px;background-color:var(--bg-card);color:#fff;padding:15px 20px;border-radius:8px;z-index:1001;display:none;border:1px solid var(--border);box-shadow:0 4px 12px rgba(0,0,0,.3);opacity:0;transition:opacity .3s,transform .3s;transform:translateY(-20px)}#toast.show{display:block;opacity:1;transform:translateY(0)}#toast.error{border-left:5px solid var(--danger)}#toast.success{border-left:5px solid var(--success)}.actions-cell{display:flex;gap:8px;justify-content:flex-start}.modal-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background-color:rgba(0,0,0,.7);z-index:1000;display:flex;justify-content:center;align-items:center;opacity:0;visibility:hidden;transition:opacity .3s,visibility .3s}.modal-overlay.show{opacity:1;visibility:visible}.modal-content{background-color:var(--bg-card);padding:30px;border-radius:12px;box-shadow:0 5px 25px rgba(0,0,0,.4);width:90%;max-width:500px;transform:scale(.9);transition:transform .3s;border:1px solid var(--border)}.modal-overlay.show .modal-content{transform:scale(1)}.modal-header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border);padding-bottom:15px;margin-bottom:20px}.modal-header h2{margin:0;border:0;font-size:20px}.modal-close-btn{background:0 0;border:0;color:var(--text-secondary);font-size:24px;cursor:pointer;line-height:1}.modal-footer{display:flex;justify-content:flex-end;gap:12px;margin-top:25px}.time-quick-set-group,.data-quick-set-group{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}.btn-outline-secondary{background-color:transparent;border:1px solid var(--btn-secondary-bg);color:var(--text-secondary);padding:6px 10px;font-size:12px;font-weight:500}.btn-outline-secondary:hover{background-color:var(--btn-secondary-bg);color:#fff;border-color:var(--btn-secondary-bg)}.progress-bar-container{width:100%;background-color:#374151;border-radius:4px;height:8px;overflow:hidden;margin-top:4px}.progress-bar{height:100%;background-color:var(--success);transition:width .3s ease}.progress-bar.warning{background-color:var(--expired)}.progress-bar.danger{background-color:var(--danger)}.traffic-text{font-size:12px;color:var(--text-secondary);margin-top:4px;text-align:right}.dashboard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:30px}.dashboard-stat{background-color:var(--bg-card);padding:16px;border-radius:8px;border:1px solid var(--border);text-align:center}.dashboard-stat h3{font-size:28px;color:var(--accent);margin:0}.dashboard-stat p{color:var(--text-secondary);margin:0;font-size:14px}.search-container{margin-bottom:16px}.search-input{width:100%;padding:10px;border-radius:6px;background-color:#374151;border:1px solid #4B5563;color:var(--text-primary)}.table-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}.pagination{display:flex;justify-content:center;align-items:center;gap:8px;margin-top:24px}.pagination .btn{padding:6px 12px}.pagination span{color:var(--text-secondary);font-size:14px}.export-btn{background-color:#10B981;color:#fff}#statsChartContainer{margin-top:20px;position:relative;height:300px}</style></head><body><div class="container"><h1>Admin Dashboard</h1><div class="dashboard-grid" id="dashboardStats"></div><div id="statsChartContainer"><canvas id="statsChart"></canvas></div><div class="card"><h2>Create User</h2><form id="createUserForm" class="form-grid"><div class="form-group" style="grid-column:1/-1"><label for="uuid">UUID</label><div class="input-group"><input type="text" id="uuid" required><button type="button" id="generateUUID" class="btn btn-secondary">Generate</button></div></div><div class="form-group"><label for="expiryDate">Expiry Date</label><input type="date" id="expiryDate" required></div><div class="form-group"><label for="expiryTime">Expiry Time (Your Local Time)</label><input type="time" id="expiryTime" step="1" required><div class="label-note">Auto-converted to UTC.</div><div class="time-quick-set-group" data-target-date="expiryDate" data-target-time="expiryTime"><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="hour">+1 Hour</button><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="day">+1 Day</button><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="month">+1 Month</button></div></div><div class="form-group"><label for="dataLimit">Data Limit</label><div class="input-group"><input type="number" id="dataLimitValue" min="0" value="0" required><select id="dataLimitUnit"><option value="GB" selected>GB</option><option value="MB">MB</option><option value="TB">TB</option><option value="KB">KB</option></select><button type="button" class="btn btn-secondary" id="setUnlimitedCreate">Unlimited</button></div><div class="data-quick-set-group"><button type="button" class="btn btn-outline-secondary" data-gb="10">10GB</button><button type="button" class="btn btn-outline-secondary" data-gb="50">50GB</button><button type="button" class="btn btn-outline-secondary" data-gb="100">100GB</button></div></div><div class="form-group"><label for="notes">Notes</label><input type="text" id="notes" placeholder="(Optional)"></div><div class="form-group"><label>&nbsp;</label><button type="submit" class="btn btn-primary">Create User</button></div></form></div><div class="card" style="margin-top:30px"><h2>User List</h2><div class="search-container"><input type="text" id="searchInput" class="search-input" placeholder="Search by UUID or Notes..."></div><div class="table-header"><button id="deleteSelected" class="btn btn-danger">Delete Selected</button><button id="exportUsers" class="btn export-btn">Export to CSV</button></div><div style="overflow-x:auto"><table><thead><tr><th><input type="checkbox" id="selectAll"></th><th>UUID</th><th>Created</th><th>Expiry</th><th>Tehran Time</th><th>Status</th><th>Traffic</th><th>Notes</th><th>Actions</th></tr></thead><tbody id="userList"></tbody></table></div><div class="pagination" id="pagination"></div></div></div><div id="toast"></div><div id="editModal" class="modal-overlay"><div class="modal-content"><div class="modal-header"><h2>Edit User</h2><button id="modalCloseBtn" class="modal-close-btn">&times;</button></div><form id="editUserForm"><input type="hidden" id="editUuid" name="uuid"><div class="form-group"><label for="editExpiryDate">Expiry Date</label><input type="date" id="editExpiryDate" name="exp_date" required></div><div class="form-group" style="margin-top:16px"><label for="editExpiryTime">Expiry Time (Local)</label><input type="time" id="editExpiryTime" name="exp_time" step="1" required><div class="time-quick-set-group" data-target-date="editExpiryDate" data-target-time="editExpiryTime"><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="hour">+1 Hour</button><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="day">+1 Day</button><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="month">+1 Month</button></div></div><div class="form-group" style="margin-top:16px"><label for="editDataLimit">Data Limit</label><div class="input-group"><input type="number" id="editDataLimitValue" min="0" required><select id="editDataLimitUnit"><option value="GB" selected>GB</option><option value="MB">MB</option><option value="TB">TB</option><option value="KB">KB</option></select><button type="button" class="btn btn-secondary" id="setUnlimitedEdit">Unlimited</button></div><div class="data-quick-set-group"><button type="button" class="btn btn-outline-secondary" data-gb="10">10GB</button><button type="button" class="btn btn-outline-secondary" data-gb="50">50GB</button><button type="button" class="btn btn-outline-secondary" data-gb="100">100GB</button></div></div><div class="form-group" style="margin-top:16px"><label for="editNotes">Notes</label><input type="text" id="editNotes" name="notes" placeholder="(Optional)"></div><div class="form-group" style="margin-top:16px"><label><input type="checkbox" id="resetTraffic" name="resetTraffic"> Reset Traffic Usage</label></div><div class="modal-footer"><button type="button" id="modalCancelBtn" class="btn btn-secondary">Cancel</button><button type="submit" class="btn btn-primary">Save Changes</button></div></form></div></div><script>/* SCRIPT_PLACEHOLDER */</script></body></html>`;
+const adminPanelHTML = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Admin Dashboard</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script><style>:root{--bg-main:#111827;--bg-card:#1F2937;--border:#374151;--text-primary:#F9FAFB;--text-secondary:#9CA3AF;--accent:#3B82F6;--accent-hover:#2563EB;--danger:#EF4444;--danger-hover:#DC2626;--success:#22C55E;--expired:#F59E0B;--btn-secondary-bg:#4B5563}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background-color:var(--bg-main);color:var(--text-primary);font-size:14px}.container{max-width:1200px;margin:40px auto;padding:0 20px}h1,h2{font-weight:600}h1{font-size:24px;margin-bottom:20px}h2{font-size:18px;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:20px}.card{background-color:var(--bg-card);border-radius:8px;padding:24px;border:1px solid var(--border);box-shadow:0 4px 6px rgba(0,0,0,.1)}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;align-items:flex-end}.form-group{display:flex;flex-direction:column}.form-group label{margin-bottom:8px;font-weight:500;color:var(--text-secondary)}.form-group .input-group{display:flex}input[type=text],input[type=date],input[type=time],input[type=number],select{width:100%;box-sizing:border-box;background-color:#374151;border:1px solid #4B5563;color:var(--text-primary);padding:10px;border-radius:6px;font-size:14px;transition:border-color .2s}input:focus{outline:0;border-color:var(--accent)}.label-note{font-size:11px;color:var(--text-secondary);margin-top:4px}.btn{padding:10px 16px;border:0;border-radius:6px;font-weight:600;cursor:pointer;transition:background-color .2s,transform .1s;display:inline-flex;align-items:center;justify-content:center;gap:8px}.btn:active{transform:scale(.98)}.btn-primary{background-color:var(--accent);color:#fff}.btn-primary:hover{background-color:var(--accent-hover)}.btn-secondary{background-color:var(--btn-secondary-bg);color:#fff}.btn-secondary:hover{background-color:#6B7280}.btn-danger{background-color:var(--danger);color:#fff}.btn-danger:hover{background-color:var(--danger-hover)}.input-group .btn-secondary{border-top-left-radius:0;border-bottom-left-radius:0}.input-group input, .input-group select{border-radius: 0; border-right: 0}.input-group input:first-child, .input-group select:first-child{border-top-left-radius: 6px; border-bottom-left-radius: 6px}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{padding:12px 16px;text-align:left;border-bottom:1px solid var(--border);overflow:hidden;text-overflow:ellipsis}th{color:var(--text-secondary);font-weight:600;font-size:12px;text-transform:uppercase;white-space:nowrap}td{color:var(--text-primary);font-family:"SF Mono","Fira Code",monospace;vertical-align:middle}.status-badge{padding:4px 8px;border-radius:12px;font-size:12px;font-weight:600;display:inline-block}.status-active{background-color:var(--success);color:#064E3B}.status-expired{background-color:var(--expired);color:#78350F}.actions-cell .btn{padding:6px 10px;font-size:12px}#toast{position:fixed;top:20px;right:20px;background-color:var(--bg-card);color:#fff;padding:15px 20px;border-radius:8px;z-index:1001;display:none;border:1px solid var(--border);box-shadow:0 4px 12px rgba(0,0,0,.3);opacity:0;transition:opacity .3s,transform .3s;transform:translateY(-20px)}#toast.show{display:block;opacity:1;transform:translateY(0)}#toast.error{border-left:5px solid var(--danger)}#toast.success{border-left:5px solid var(--success)}.actions-cell{display:flex;gap:8px;justify-content:flex-start}.modal-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background-color:rgba(0,0,0,.7);z-index:1000;display:flex;justify-content:center;align-items:center;opacity:0;visibility:hidden;transition:opacity .3s,visibility .3s}.modal-overlay.show{opacity:1;visibility:visible}.modal-content{background-color:var(--bg-card);padding:30px;border-radius:12px;box-shadow:0 5px 25px rgba(0,0,0,.4);width:90%;max-width:500px;transform:scale(.9);transition:transform .3s;border:1px solid var(--border)}.modal-overlay.show .modal-content{transform:scale(1)}.modal-header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border);padding-bottom:15px;margin-bottom:20px}.modal-header h2{margin:0;border:0;font-size:20px}.modal-close-btn{background:0 0;border:0;color:var(--text-secondary);font-size:24px;cursor:pointer;line-height:1}.modal-footer{display:flex;justify-content:flex-end;gap:12px;margin-top:25px}.time-quick-set-group,.data-quick-set-group{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}.btn-outline-secondary{background-color:transparent;border:1px solid var(--btn-secondary-bg);color:var(--text-secondary);padding:6px 10px;font-size:12px;font-weight:500}.btn-outline-secondary:hover{background-color:var(--btn-secondary-bg);color:#fff;border-color:var(--btn-secondary-bg)}.progress-bar-container{width:100%;background-color:#374151;border-radius:4px;height:8px;overflow:hidden;margin-top:4px}.progress-bar{height:100%;background-color:var(--success);transition:width .3s ease}.progress-bar.warning{background-color:var(--expired)}.progress-bar.danger{background-color:var(--danger)}.traffic-text{font-size:12px;color:var(--text-secondary);margin-top:4px;text-align:right}.dashboard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:30px}.dashboard-stat{background-color:var(--bg-card);padding:16px;border-radius:8px;border:1px solid var(--border);text-align:center}.dashboard-stat h3{font-size:28px;color:var(--accent);margin:0}.dashboard-stat p{color:var(--text-secondary);margin:0;font-size:14px}.search-container{margin-bottom:16px}.search-input{width:100%;padding:10px;border-radius:6px;background-color:#374151;border:1px solid #4B5563;color:var(--text-primary)}.table-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}.pagination{display:flex;justify-content:center;align-items:center;gap:8px;margin-top:24px}.pagination .btn{padding:6px 12px}.pagination span{color:var(--text-secondary);font-size:14px}.export-btn{background-color:#10B981;color:#fff}#statsChartContainer{margin-top:20px;position:relative;height:300px}</style></head><body><div class="container"><h1>Admin Dashboard</h1><div class="dashboard-grid" id="dashboardStats"></div><div id="statsChartContainer"><canvas id="statsChart"></canvas></div><div class="card"><h2>Create User</h2><form id="createUserForm" class="form-grid"><div class="form-group" style="grid-column:1/-1"><label for="uuid">UUID</label><div class="input-group"><input type="text" id="uuid" required><button type="button" id="generateUUID" class="btn btn-secondary">Generate</button></div></div><div class="form-group"><label for="expiryDate">Expiry Date</label><input type="date" id="expiryDate" required></div><div class="form-group"><label for="expiryTime">Expiry Time (Your Local Time)</label><input type="time" id="expiryTime" step="1" required><div class="label-note">Auto-converted to UTC.</div><div class="time-quick-set-group" data-target-date="expiryDate" data-target-time="expiryTime"><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="hour">+1 Hour</button><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="day">+1 Day</button><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="month">+1 Month</button></div></div><div class="form-group"><label for="dataLimit">Data Limit</label><div class="input-group"><input type="number" id="dataLimitValue" min="0" value="0" required><select id="dataLimitUnit"><option value="GB" selected>GB</option><option value="MB">MB</option><option value="TB">TB</option><option value="KB">KB</option></select><button type="button" class="btn btn-secondary" id="setUnlimitedCreate">Unlimited</button></div><div class="data-quick-set-group"><button type="button" class="btn btn-outline-secondary" data-gb="10">10GB</button><button type="button" class="btn btn-outline-secondary" data-gb="50">50GB</button><button type="button" class="btn btn-outline-secondary" data-gb="100">100GB</button></div></div><div class="form-group"><label for="notes">Notes</label><input type="text" id="notes" placeholder="(Optional)"></div><div class="form-group"><label>&nbsp;</label><button type="submit" class="btn btn-primary">Create User</button></div></form></div><div class="card" style="margin-top:30px"><h2>User List</h2><div class="search-container"><input type="text" id="searchInput" class="search-input" placeholder="Search by UUID or Notes..."></div><div class="table-header"><button id="deleteSelected" class="btn btn-danger">Delete Selected</button><button id="exportUsers" class="btn export-btn">Export to CSV</button></div><div style="overflow-x:auto"><table><thead><tr><th><input type="checkbox" id="selectAll"></th><th>UUID</th><th>Created</th><th>Expiry</th><th>Tehran Time</th><th>Status</th><th>Traffic</th><th>Notes</th><th>Actions</th></tr></thead><tbody id="userList"></tbody></table></div><div class="pagination" id="pagination"></div></div></div><div id="toast"></div><div id="editModal" class="modal-overlay"><div class="modal-content"><div class="modal-header"><h2>Edit User</h2><button id="modalCloseBtn" class="modal-close-btn">&times;</button></div><form id="editUserForm"><input type="hidden" id="editUuid" name="uuid"><div class="form-group"><label for="editExpiryDate">Expiry Date</label><input type="date" id="editExpiryDate" name="exp_date" required></div><div class="form-group" style="margin-top:16px"><label for="editExpiryTime">Expiry Time (Local)</label><input type="time" id="editExpiryTime" name="exp_time" step="1" required><div class="time-quick-set-group" data-target-date="editExpiryDate" data-target-time="editExpiryTime"><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="hour">+1 Hour</button><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="day">+1 Day</button><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="month">+1 Month</button></div></div><div class="form-group" style="margin-top:16px"><label for="editDataLimit">Data Limit</label><div class="input-group"><input type="number" id="editDataLimitValue" min="0" required><select id="editDataLimitUnit"><option value="GB" selected>GB</option><option value="MB">MB</option><option value="TB">TB</option><option value="KB">KB</option></select><button type="button" class="btn btn-secondary" id="setUnlimitedEdit">Unlimited</button></div><div class="data-quick-set-group"><button type="button" class="btn btn-outline-secondary" data-gb="10">10GB</button><button type="button" class="btn btn-outline-secondary" data-gb="50">50GB</button><button type="button" class="btn btn-outline-secondary" data-gb="100">100GB</button></div></div><div class="form-group" style="margin-top:16px"><label for="editNotes">Notes</label><input type="text" id="editNotes" name="notes" placeholder="(Optional)"></div><div class="form-group" style="margin-top:16px"><label><input type="checkbox" id="resetTraffic" name="resetTraffic"> Reset Traffic Usage</label></div><div class="modal-footer"><button type="button" id="modalCancelBtn" class="btn btn-secondary">Cancel</button><button type="submit" class="btn btn-primary">Save Changes</button></div></form></div></div><script>/* SCRIPT_PLACEHOLDER */</script></body></html>`;
 
 async function isAdmin(request, env) {
     const cookieHeader = request.headers.get('Cookie');
@@ -550,9 +559,9 @@ const rateLimiter = new Map();
 function checkRateLimit(ip) {
     const now = Date.now();
     const entry = rateLimiter.get(ip) || { count: 0, timestamp: now };
-    if (now - entry.timestamp > 60000) { // Reset count every minute
-        entry.count = 0;
-        entry.timestamp = now;
+    if (now - entry.timestamp > 60000) { // Reset every minute
+        rateLimiter.set(ip, { count: 1, timestamp: now });
+        return true;
     }
     entry.count++;
     rateLimiter.set(ip, entry);
@@ -584,6 +593,7 @@ async function handleAdminRequest(request, env) {
             return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: jsonHeader });
         }
 
+        // CSRF and Origin check for all mutating methods
         if (request.method !== 'GET') {
             const receivedCsrfToken = request.headers.get('X-CSRF-Token');
             const storedCsrfToken = await env.USER_KV.get('csrf_token');
@@ -596,22 +606,31 @@ async function handleAdminRequest(request, env) {
             }
         }
         
-        const apiRoutes = {
-            '/admin/api/stats': async () => new Response(JSON.stringify(await fetchDashboardStats(env)), { status: 200, headers: jsonHeader }),
-            '/admin/api/users': async () => {
-                if(request.method === 'GET') {
+        try {
+            // GET /admin/api/stats
+            if (pathname === '/admin/api/stats' && request.method === 'GET') {
+                return new Response(JSON.stringify(await fetchDashboardStats(env)), { status: 200, headers: jsonHeader });
+            }
+
+            // GET & POST /admin/api/users
+            if (pathname === '/admin/api/users') {
+                if (request.method === 'GET') {
                     const { results } = await env.DB.prepare("SELECT * FROM users ORDER BY created_at DESC").all();
                     return new Response(JSON.stringify(results ?? []), { status: 200, headers: jsonHeader });
                 }
-                if(request.method === 'POST') {
-                    const { uuid, exp_date: expDate, exp_time: expTime, data_limit, notes } = await request.json();
-                    if (!isValidUUID(uuid) || !expDate || !expTime) throw new Error('Invalid or missing fields.');
+                if (request.method === 'POST') {
+                    const { uuid, exp_date, exp_time, data_limit, notes } = await request.json();
+                    if (!isValidUUID(uuid) || !exp_date || !exp_time || data_limit === undefined) {
+                         throw new Error('Invalid or missing fields. UUID, date, time, and data_limit are required.');
+                    }
                     await env.DB.prepare("INSERT INTO users (uuid, expiration_date, expiration_time, data_limit, notes) VALUES (?, ?, ?, ?, ?)")
-                        .bind(uuid, expDate, expTime, data_limit || 0, notes || null).run();
+                        .bind(uuid, exp_date, exp_time, data_limit ?? 0, notes || null).run();
                     return new Response(JSON.stringify({ success: true, uuid }), { status: 201, headers: jsonHeader });
                 }
-            },
-            '/admin/api/users/bulk-delete': async () => {
+            }
+
+            // POST /admin/api/users/bulk-delete
+            if (pathname === '/admin/api/users/bulk-delete' && request.method === 'POST') {
                  const { uuids } = await request.json();
                  if (!Array.isArray(uuids) || uuids.length === 0) throw new Error('UUIDs array is required.');
                  const validUuids = uuids.filter(isValidUUID);
@@ -619,22 +638,21 @@ async function handleAdminRequest(request, env) {
                  await Promise.all(validUuids.map(uuid => env.USER_KV.delete(`user:${uuid}`)));
                  return new Response(JSON.stringify({ success: true, count: validUuids.length }), { status: 200, headers: jsonHeader });
             }
-        };
-
-        try {
-            if (apiRoutes[pathname]) return await apiRoutes[pathname]();
             
+            // PUT & DELETE /admin/api/users/:uuid
             const userRouteMatch = pathname.match(/^\/admin\/api\/users\/([a-f0-9-]+)$/);
             if (userRouteMatch) {
                 const uuid = userRouteMatch[1];
                 if (!isValidUUID(uuid)) return new Response(JSON.stringify({ error: 'Invalid UUID format' }), { status: 400, headers: jsonHeader });
                 
                 if (request.method === 'PUT') {
-                    const { exp_date: expDate, exp_time: expTime, data_limit, notes, reset_traffic } = await request.json();
-                    if (!expDate || !expTime) throw new Error('Invalid date/time fields.');
+                    const { exp_date, exp_time, data_limit, notes, reset_traffic } = await request.json();
+                    if (!exp_date || !exp_time || data_limit === undefined) throw new Error('Invalid or missing fields. Date, time, and data_limit are required.');
+                    
                     let query = "UPDATE users SET expiration_date = ?, expiration_time = ?, data_limit = ?, notes = ?" + (reset_traffic ? ", used_traffic = 0" : "") + " WHERE uuid = ?";
-                    await env.DB.prepare(query).bind(expDate, expTime, data_limit ?? 0, notes || null, uuid).run();
-                    await env.USER_KV.delete(`user:${uuid}`);
+                    await env.DB.prepare(query).bind(exp_date, exp_time, data_limit ?? 0, notes || null, uuid).run();
+                    
+                    await env.USER_KV.delete(`user:${uuid}`); // Invalidate cache
                     return new Response(JSON.stringify({ success: true, uuid }), { status: 200, headers: jsonHeader });
                 }
                 if (request.method === 'DELETE') {
@@ -670,8 +688,8 @@ async function handleAdminRequest(request, env) {
         if (request.method === 'GET') {
             if (await isAdmin(request, env)) {
                 const csrfToken = await env.USER_KV.get('csrf_token') || crypto.randomUUID();
-                // Correctly inject the script and the CSRF token
-                const scriptString = `(${getAdminPanelScript.toString()})()`.replace('"CSRF_TOKEN_PLACEHOLDER"', `"${csrfToken}"`);
+                // **FIX:** Correctly inject the real CSRF token into the script.
+                const scriptString = `(${getAdminPanelScript.toString()})("${csrfToken}");`;
                 const finalAdminPanelHTML = adminPanelHTML.replace('/* SCRIPT_PLACEHOLDER */', scriptString);
                 return new Response(finalAdminPanelHTML, { headers: htmlHeader });
             }
@@ -681,6 +699,7 @@ async function handleAdminRequest(request, env) {
     }
     return new Response('Admin route not found.', { status: 404 });
 }
+
 
 // --- User Config Page & VLESS Logic ---
 
@@ -693,7 +712,7 @@ function getPageHTML(clientUrls, subXrayUrl, subSbUrl) {
 }
 
 function getPageScript() {
-  return `function copyToClipboard(button,text){navigator.clipboard.writeText(text).then(()=>{const t=button.innerHTML;button.innerHTML="Copied!",button.classList.add("copied"),setTimeout(()=>{button.innerHTML=t,button.classList.remove("copied")},1500)}).catch(t=>console.error("Failed to copy: ",t))}async function fetchIpInfo(t){try{const o=await fetch("https://ip-api.io/json/"+t);return o.ok?await o.json():null}catch(t){return null}}function updateIpDisplay(t,o,n=null){n&&(document.getElementById(o+"-host").textContent=n),t&&(document.getElementById(o+"-ip")?.textContent||(document.getElementById(o+"-ip").innerHTML=""),document.getElementById(o+"-ip").textContent=t.ip||"N/A",(e=document.getElementById(o+"-location"))&&(l=[t.city,t.country_name].filter(Boolean).join(", "),t.country_code&&(l=\`<img src="https://flagcdn.com/w20/\${t.country_code.toLowerCase()}.png" class="country-flag"> \${l}\`),e.innerHTML=l||"N/A"));var e,l}function displayExpiration(){const t=document.getElementById("expiration-display"),o=document.getElementById("expiration-relative");if(t&&t.dataset.utcTime){const n=new Date(t.dataset.utcTime);if(!isNaN(n.getTime())){const e=(n.getTime()-(new Date).getTime())/1e3,i=e<0;let a="";a=new Intl.RelativeTimeFormat("en",{numeric:"auto"}),a=Math.abs(e)<3600?a.format(Math.round(e/60),"minute"):Math.abs(e)<86400?a.format(Math.round(e/3600),"hour"):a.format(Math.round(e/86400),"day"),o&&(o.textContent=i?\`Expired \${a}\`:\`Expires \${a}\`,o.classList.add(i?"expired":"active")),t.innerHTML=\`<span><strong>Local:</strong> \${n.toLocaleString(undefined,{dateStyle:"medium",timeStyle:"short"})}</span><span><strong>Tehran:</strong> \${n.toLocaleString("en-US",{timeZone:"Asia/Tehran",dateStyle:"medium",timeStyle:"short"})}</span>\`}}}document.addEventListener("DOMContentLoaded",async()=>{const t=document.body.getAttribute("data-proxy-ip"),[o,]=t.split(":");updateIpDisplay(await fetchIpInfo(o),"proxy",t),updateIpDisplay(await fetchIpInfo(""),"client"),displayExpiration()});`;
+  return `function copyToClipboard(button,text){navigator.clipboard.writeText(text).then(()=>{const t=button.innerHTML;button.innerHTML="Copied!",button.classList.add("copied"),setTimeout(()=>{button.innerHTML=t,button.classList.remove("copied")},1500)}).catch(t=>console.error("Failed to copy: ",t))}async function fetchIpInfo(t){try{const o=await fetch("https://ip-api.io/json/"+(t||""));return o.ok?await o.json():null}catch(t){return null}}function updateIpDisplay(t,o,n=null){n&&(document.getElementById(o+"-host").textContent=n);if(!t){document.getElementById(o+"-ip").textContent="N/A";document.getElementById(o+"-location").textContent="N/A";return}document.getElementById(o+"-ip").textContent=t.ip||"N/A";const e=document.getElementById(o+"-location");let l=[t.city,t.country_name].filter(Boolean).join(", ");t.country_code&&(l=\`<img src="https://flagcdn.com/w20/\${t.country_code.toLowerCase()}.png" class="country-flag"> \${l}\`),e.innerHTML=l||"N/A"}function displayExpiration(){const t=document.getElementById("expiration-display"),o=document.getElementById("expiration-relative");if(t&&t.dataset.utcTime){const n=new Date(t.dataset.utcTime);if(!isNaN(n.getTime())){const e=(n.getTime()-(new Date).getTime())/1e3,i=e<0;let a="";a=new Intl.RelativeTimeFormat("en",{numeric:"auto"}),a=Math.abs(e)<3600?a.format(Math.round(e/60),"minute"):Math.abs(e)<86400?a.format(Math.round(e/3600),"hour"):a.format(Math.round(e/86400),"day"),o&&(o.textContent=i?\`Expired \${a}\`:\`Expires \${a}\`,o.classList.add(i?"expired":"active")),t.innerHTML=\`<span><strong>Local:</strong> \${n.toLocaleString(undefined,{dateStyle:"medium",timeStyle:"short"})}</span><span><strong>Tehran:</strong> \${n.toLocaleString("en-US",{timeZone:"Asia/Tehran",dateStyle:"medium",timeStyle:"short"})}</span>\`}}}document.addEventListener("DOMContentLoaded",async()=>{const t=document.body.getAttribute("data-proxy-ip"),[o]=t.split(":");updateIpDisplay(await fetchIpInfo(o),"proxy",t),updateIpDisplay(await fetchIpInfo(),"client"),displayExpiration()});`;
 }
 
 function generateBeautifulConfigPage(userID, hostName, proxyAddress, expDate, expTime, dataLimit, usedTraffic) {
@@ -702,13 +721,13 @@ function generateBeautifulConfigPage(userID, hostName, proxyAddress, expDate, ex
     const clientUrls = {
         universalAndroid: `v2rayng://install-config?url=${encodeURIComponent(subXrayUrl)}`,
         shadowrocket: `shadowrocket://add/sub?url=${encodeURIComponent(subXrayUrl)}&name=${encodeURIComponent(hostName)}`,
-        clashMeta: `clash://install-config?url=${encodeURIComponent(`https://sub.bonds.dev/sub/clash?url=${subSbUrl}`)}`,
+        clashMeta: `clash://install-config?url=${encodeURIComponent(`https://sub.bonds.dev/sub/clash?url=${encodeURIComponent(subSbUrl)}`)}`,
     };
 
     const utcTimestamp = (expDate && expTime) ? `${expDate}T${expTime.split('.')[0]}Z` : '';
 
     const formatBytes = (bytes) => {
-        if (!bytes || bytes === 0) return '0 B';
+        if (bytes === null || typeof bytes === 'undefined' || bytes === 0) return '0 B';
         const i = Math.floor(Math.log(bytes) / Math.log(1024));
         return `${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} ${['B', 'KB', 'MB', 'GB', 'TB'][i]}`;
     };
@@ -769,7 +788,20 @@ async function vlessOverWSHandler(request, env, ctx) {
     const [client, webSocket] = Object.values(webSocketPair);
     webSocket.accept();
 
-    const connectionState = { uuid: '', remoteSocket: null, incoming: 0, outgoing: 0 };
+    let connectionState = { uuid: '', remoteSocket: null, incoming: 0, outgoing: 0, closed: false };
+    
+    function closeConnection() {
+        if (connectionState.closed) return;
+        connectionState.closed = true;
+        if (connectionState.uuid && (connectionState.incoming > 0 || connectionState.outgoing > 0)) {
+            ctx.waitUntil(updateUsedTraffic(env, connectionState.uuid, connectionState.incoming + connectionState.outgoing));
+        }
+        if (connectionState.remoteSocket) {
+            try { connectionState.remoteSocket.close(); } catch(e) {}
+        }
+        safeCloseWebSocket(webSocket);
+    }
+    
     const earlyData = base64ToArrayBuffer(request.headers.get('Sec-WebSocket-Protocol') || '');
 
     const readableWebSocketStream = new ReadableStream({
@@ -779,8 +811,14 @@ async function vlessOverWSHandler(request, env, ctx) {
                 connectionState.outgoing += data.byteLength;
                 controller.enqueue(data);
             });
-            webSocket.addEventListener('close', () => { try { controller.close(); } catch(e){} });
-            webSocket.addEventListener('error', err => controller.error(err));
+            webSocket.addEventListener('close', () => {
+                closeConnection();
+                try { controller.close(); } catch(e){}
+            });
+            webSocket.addEventListener('error', err => {
+                log(`WebSocket error: ${err.message}`, 'error');
+                controller.error(err);
+            });
             if (earlyData) {
                 connectionState.outgoing += earlyData.byteLength;
                 controller.enqueue(earlyData);
@@ -790,58 +828,80 @@ async function vlessOverWSHandler(request, env, ctx) {
 
     readableWebSocketStream.pipeTo(
         new WritableStream({
-            async write(chunk) {
+            async write(chunk, controller) {
                 if (connectionState.remoteSocket) {
-                    const writer = connectionState.remoteSocket.writable.getWriter();
-                    await writer.write(chunk);
-                    writer.releaseLock();
-                    return;
+                    try {
+                        const writer = connectionState.remoteSocket.writable.getWriter();
+                        await writer.write(chunk);
+                        writer.releaseLock();
+                        return;
+                    } catch (err) {
+                        log(`Error writing to remote socket: ${err.message}`, 'error');
+                        controller.error(err);
+                        closeConnection();
+                    }
                 }
 
-                const { uuid, address, port, rawDataIndex } = await processVlessHeader(chunk, env);
-                connectionState.uuid = uuid;
-                
-                const remoteSocket = await connect({ hostname: address, port });
-                connectionState.remoteSocket = remoteSocket;
+                try {
+                    const { uuid, address, port, rawDataIndex } = await processVlessHeader(chunk, env);
+                    connectionState.uuid = uuid;
+                    
+                    const remoteSocket = await connect({ hostname: address, port });
+                    connectionState.remoteSocket = remoteSocket;
 
-                const writer = remoteSocket.writable.getWriter();
-                await writer.write(chunk.slice(rawDataIndex));
-                writer.releaseLock();
+                    const writer = remoteSocket.writable.getWriter();
+                    await writer.write(chunk.slice(rawDataIndex));
+                    writer.releaseLock();
 
-                let vlessResponseSent = false;
-                remoteSocket.readable.pipeTo(
-                    new WritableStream({
-                        write: chunk => {
-                            if (webSocket.readyState !== CONST.WS_READY_STATE_OPEN) return;
-                            if (!vlessResponseSent) {
-                                const vlessResponse = new Uint8Array([0, 0]);
-                                const combinedChunk = new Uint8Array(vlessResponse.length + chunk.length);
-                                combinedChunk.set(vlessResponse);
-                                combinedChunk.set(chunk, vlessResponse.length);
-                                connectionState.incoming += combinedChunk.byteLength;
-                                webSocket.send(combinedChunk);
-                                vlessResponseSent = true;
-                            } else {
-                                connectionState.incoming += chunk.byteLength;
-                                webSocket.send(chunk);
-                            }
-                        }
-                    })
-                ).catch(err => log(`Remote socket pipe failed: ${err}`, 'error'));
+                    let vlessResponseSent = false;
+                    remoteSocket.readable.pipeTo(
+                        new WritableStream({
+                            write: data => {
+                                if (webSocket.readyState !== CONST.WS_READY_STATE_OPEN) return;
+                                if (!vlessResponseSent) {
+                                    const vlessResponse = new Uint8Array([0, 0]);
+                                    const combinedChunk = new Uint8Array(vlessResponse.length + data.length);
+                                    combinedChunk.set(vlessResponse);
+                                    combinedChunk.set(data, vlessResponse.length);
+                                    connectionState.incoming += combinedChunk.byteLength;
+                                    webSocket.send(combinedChunk);
+                                    vlessResponseSent = true;
+                                } else {
+                                    connectionState.incoming += data.byteLength;
+                                    webSocket.send(data);
+                                }
+                            },
+                            close: () => log(`Remote socket readable closed for ${uuid}`),
+                            abort: (err) => log(`Remote socket readable aborted for ${uuid}: ${err.message}`, 'error')
+                        })
+                    ).catch(err => {
+                        log(`Remote socket pipe failed for ${uuid}: ${err.message}`, 'error');
+                        closeConnection();
+                    });
+                } catch(err) {
+                    log(`VLESS processing error: ${err.message}`, 'error');
+                    controller.error(err);
+                    closeConnection();
+                }
+            },
+            abort: (err) => {
+                log(`Main pipeline aborted: ${err.message}`, 'error');
+                closeConnection();
+            },
+            close: () => {
+                log('Main pipeline closed.');
+                closeConnection();
             }
         })
     ).catch(err => {
-        log(`Main pipeline failed: ${err.message}`, 'error');
-    }).finally(() => {
-        if (connectionState.uuid) {
-            ctx.waitUntil(updateUsedTraffic(env, connectionState.uuid, connectionState.incoming + connectionState.outgoing));
-        }
-        if (connectionState.remoteSocket) connectionState.remoteSocket.close();
-        safeCloseWebSocket(webSocket);
+        // This will catch errors from the WritableStream's write/abort methods.
+        log(`Unhandled pipeline failure: ${err.message}`, 'error');
+        closeConnection();
     });
 
     return new Response(null, { status: 101, webSocket: client });
 }
+
 
 async function processVlessHeader(vlessBuffer, env) {
     if (vlessBuffer.byteLength < 24) throw new Error('Invalid VLESS header: too short');
@@ -851,12 +911,13 @@ async function processVlessHeader(vlessBuffer, env) {
     
     const userData = await getUserData(env, uuid);
     if (!isUserValid(userData)) {
-        throw new Error('User is invalid, expired, or has reached their data limit');
+        throw new Error(`User validation failed for ${uuid}. User might be expired or over traffic limit.`);
     }
 
     const optLen = view.getUint8(17);
     const command = view.getUint8(18 + optLen);
-    if(command === 2) throw new Error('UDP is not supported.'); // Block UDP requests
+    if(command === 2) throw new Error('UDP is not supported.');
+    if(command !== 1) throw new Error(`Unsupported command: ${command}`);
 
     const port = view.getUint16(19 + optLen);
     let addressIndex = 21 + optLen;
@@ -871,7 +932,7 @@ async function processVlessHeader(vlessBuffer, env) {
         address = new TextDecoder().decode(vlessBuffer.slice(addressIndex, addressIndex + domainLen));
         addressIndex += domainLen;
     } else if (addressType === 3) { // IPv6
-        const ipv6 = new DataView(vlessBuffer.buffer, addressIndex, 16);
+        const ipv6 = new DataView(vlessBuffer.buffer, vlessBuffer.byteOffset + addressIndex, 16);
         address = Array.from({ length: 8 }, (_, i) => ipv6.getUint16(i * 2).toString(16)).join(':');
         addressIndex += 16;
     } else {
@@ -882,6 +943,7 @@ async function processVlessHeader(vlessBuffer, env) {
 }
 
 function base64ToArrayBuffer(base64Str) {
+    if (!base64Str) return null;
     try {
         const binaryStr = atob(base64Str.replace(/-/g, '+').replace(/_/g, '/'));
         const buffer = new ArrayBuffer(binaryStr.length);
@@ -895,7 +957,7 @@ function safeCloseWebSocket(socket) {
     try {
         if (socket.readyState === CONST.WS_READY_STATE_OPEN) socket.close(1000, "Closing");
     } catch (error) {
-        log(`Error closing WebSocket: ${error}`, 'error');
+        log(`Error closing WebSocket: ${error}`, 'warn');
     }
 }
 
@@ -921,7 +983,8 @@ export default {
 
             const handleSubscription = async (core) => {
                 const uuid = url.pathname.slice(`/${core}/`.length);
-                if (!isUserValid(await getUserData(env, uuid))) {
+                const userData = await getUserData(env, uuid);
+                if (!isUserValid(userData)) {
                     return new Response('Invalid or expired user', { status: 403 });
                 }
                 return handleIpSubscription(core, uuid, url.hostname);
@@ -936,7 +999,7 @@ export default {
                 if (!isUserValid(userData)) {
                     return new Response('Invalid or expired user', { status: 403 });
                 }
-                const html = generateBeautifulConfigPage(path, url.hostname, Config.fromEnv(env).proxyAddress, userData.exp_date, userData.exp_time, userData.data_limit, userData.used_traffic);
+                const html = generateBeautifulConfigPage(path, url.hostname, Config.fromEnv(env).proxyAddress, userData.expiration_date, userData.expiration_time, userData.data_limit, userData.used_traffic);
                 return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', ...CONST.securityHeaders } });
             }
 
@@ -948,9 +1011,9 @@ export default {
                     url.port = proxyUrl.port;
                     let newRequest = new Request(url, request);
                     newRequest.headers.set('Host', proxyUrl.hostname);
-                    return await fetch(newRequest);
+                    return fetch(newRequest);
                 } catch (e) {
-                    return new Response(`Reverse proxy configuration error: ${e.message}`, { status: 502 });
+                    return new Response(`ROOT_PROXY_URL is not a valid URL: ${e.message}`, { status: 500 });
                 }
             }
 
