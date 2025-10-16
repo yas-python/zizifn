@@ -1,20 +1,15 @@
 /**
  * Cloudflare Worker VLESS - Ultimate Edition (Corrected & Improved by Gemini)
  *
- * @version 3.5.0
- * @description This version introduces ctx.waitUntil() for database operations to ensure writes are
- * completed in the Pages Functions environment, fixing the issue of users not being created without errors.
- * It intelligently handles ROOT_PROXY_URL, combines a feature-rich admin panel with traffic management,
- * and leverages Cloudflare D1 and KV for a robust VLESS-over-WebSocket proxy.
+ * @version 3.6.0
+ * @description FINAL FIX. This version aligns the D1 binding variable name in the code (env.d1) with a simplified
+ * binding configuration in Cloudflare settings (d1 -> d1) to resolve the persistent silent database write failure.
+ * This ensures a robust and unambiguous connection between the Pages Function and the D1 database.
  *
  * --- SETUP INSTRUCTIONS ---
- * 1. D1 Database: Create a D1 database and run the schema below.
- * [[d1_databases]]
- * binding = "DB"
- * database_name = "your-db-name"
- * database_id = "your-db-id"
+ * 1. D1 Database: Create a D1 database named 'd1'. Run the schema below.
  *
- * 2. D1 Table Schema (Execute this in your D1 console):
+ * 2. D1 Table Schema (Execute in your D1 console):
  * CREATE TABLE users (
  * uuid TEXT PRIMARY KEY,
  * expiration_date TEXT NOT NULL,
@@ -25,12 +20,13 @@
  * created_at TEXT DEFAULT CURRENT_TIMESTAMP
  * );
  *
- * 3. KV Namespace: Create a KV namespace for caching and session management.
- * [[kv_namespaces]]
- * binding = "USER_KV"
- * id = "your-kv-namespace-id"
+ * 3. KV Namespace: Create a KV namespace.
  *
- * 4. Secrets (Set in Worker/Pages settings):
+ * 4. Bindings (Set in Worker/Pages settings -> Functions):
+ * - KV namespace binding: Variable name `USER_KV` -> Your KV namespace
+ * - D1 database binding: Variable name `d1` -> Your 'd1' database
+ *
+ * 5. Secrets (Set in Worker/Pages settings):
  * - ADMIN_KEY: A strong password for the admin panel.
  * - PROXYIP (Optional): A specific clean IP for proxying configs.
  * - ROOT_PROXY_URL (Optional): URL to reverse proxy ONLY on the root path ('/').
@@ -101,7 +97,8 @@ async function getUserData(env, uuid) {
   }
 
   try {
-    const query = await env.DB.prepare("SELECT * FROM users WHERE uuid = ?").bind(uuid).first();
+    // **FIX:** Using 'd1' binding
+    const query = await env.d1.prepare("SELECT * FROM users WHERE uuid = ?").bind(uuid).first();
     if (!query) return null;
 
     const userData = {
@@ -124,7 +121,8 @@ async function getUserData(env, uuid) {
 async function updateUsedTraffic(env, uuid, additionalTraffic) {
   if (additionalTraffic <= 0 || !isValidUUID(uuid)) return;
   try {
-    await env.DB.prepare("UPDATE users SET used_traffic = used_traffic + ? WHERE uuid = ?")
+    // **FIX:** Using 'd1' binding
+    await env.d1.prepare("UPDATE users SET used_traffic = used_traffic + ? WHERE uuid = ?")
       .bind(additionalTraffic, uuid)
       .run();
     await env.USER_KV.delete(`user:${uuid}`); // Invalidate cache after update
@@ -142,7 +140,8 @@ async function fetchDashboardStats(env) {
             SUM(used_traffic) as totalTraffic
         FROM users
     `;
-    const stats = await env.DB.prepare(query).first();
+    // **FIX:** Using 'd1' binding
+    const stats = await env.d1.prepare(query).first();
     const totalUsers = Number(stats.totalUsers ?? 0);
     const activeUsers = Number(stats.activeUsers ?? 0);
     return {
@@ -160,7 +159,8 @@ async function cleanupExpiredUsers(env) {
         oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
         const dateString = oneMonthAgo.toISOString().split('T')[0];
         
-        const stmt = env.DB.prepare("DELETE FROM users WHERE expiration_date < ?");
+        // **FIX:** Using 'd1' binding
+        const stmt = env.d1.prepare("DELETE FROM users WHERE expiration_date < ?");
         const { count } = await stmt.bind(dateString).run();
         
         if (count > 0) log(`Successfully pruned ${count} old expired users.`);
@@ -563,7 +563,6 @@ function getAdminPanelScript(csrfToken) {
 
 const adminPanelHTML = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Admin Dashboard</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script><style>:root{--bg-main:#111827;--bg-card:#1F2937;--border:#374151;--text-primary:#F9FAFB;--text-secondary:#9CA3AF;--accent:#3B82F6;--accent-hover:#2563EB;--danger:#EF4444;--danger-hover:#DC2626;--success:#22C55E;--expired:#F59E0B;--btn-secondary-bg:#4B5563}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background-color:var(--bg-main);color:var(--text-primary);font-size:14px}.container{max-width:1200px;margin:40px auto;padding:0 20px}h1,h2{font-weight:600}h1{font-size:24px;margin-bottom:20px}h2{font-size:18px;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:20px}.card{background-color:var(--bg-card);border-radius:8px;padding:24px;border:1px solid var(--border);box-shadow:0 4px 6px rgba(0,0,0,.1)}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;align-items:flex-end}.form-group{display:flex;flex-direction:column}.form-group label{margin-bottom:8px;font-weight:500;color:var(--text-secondary)}.form-group .input-group{display:flex}input[type=text],input[type=date],input[type=time],input[type=number],select{width:100%;box-sizing:border-box;background-color:#374151;border:1px solid #4B5563;color:var(--text-primary);padding:10px;border-radius:6px;font-size:14px;transition:border-color .2s}input:focus{outline:0;border-color:var(--accent)}.label-note{font-size:11px;color:var(--text-secondary);margin-top:4px}.btn{padding:10px 16px;border:0;border-radius:6px;font-weight:600;cursor:pointer;transition:background-color .2s,transform .1s;display:inline-flex;align-items:center;justify-content:center;gap:8px}.btn:active{transform:scale(.98)}.btn-primary{background-color:var(--accent);color:#fff}.btn-primary:hover{background-color:var(--accent-hover)}.btn-secondary{background-color:var(--btn-secondary-bg);color:#fff}.btn-secondary:hover{background-color:#6B7280}.btn-danger{background-color:var(--danger);color:#fff}.btn-danger:hover{background-color:var(--danger-hover)}.input-group .btn-secondary{border-top-left-radius:0;border-bottom-left-radius:0}.input-group input, .input-group select{border-radius: 0; border-right: 0}.input-group input:first-child, .input-group select:first-child{border-top-left-radius: 6px; border-bottom-left-radius: 6px}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{padding:12px 16px;text-align:left;border-bottom:1px solid var(--border);overflow:hidden;text-overflow:ellipsis}th{color:var(--text-secondary);font-weight:600;font-size:12px;text-transform:uppercase;white-space:nowrap}td{color:var(--text-primary);font-family:"SF Mono","Fira Code",monospace;vertical-align:middle}.status-badge{padding:4px 8px;border-radius:12px;font-size:12px;font-weight:600;display:inline-block}.status-active{background-color:var(--success);color:#064E3B}.status-expired{background-color:var(--expired);color:#78350F}.actions-cell .btn{padding:6px 10px;font-size:12px}#toast{position:fixed;top:20px;right:20px;background-color:var(--bg-card);color:#fff;padding:15px 20px;border-radius:8px;z-index:1001;display:none;border:1px solid var(--border);box-shadow:0 4px 12px rgba(0,0,0,.3);opacity:0;transition:opacity .3s,transform .3s;transform:translateY(-20px)}#toast.show{display:block;opacity:1;transform:translateY(0)}#toast.error{border-left:5px solid var(--danger)}#toast.success{border-left:5px solid var(--success)}.actions-cell{display:flex;gap:8px;justify-content:flex-start}.modal-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background-color:rgba(0,0,0,.7);z-index:1000;display:flex;justify-content:center;align-items:center;opacity:0;visibility:hidden;transition:opacity .3s,visibility .3s}.modal-overlay.show{opacity:1;visibility:visible}.modal-content{background-color:var(--bg-card);padding:30px;border-radius:12px;box-shadow:0 5px 25px rgba(0,0,0,.4);width:90%;max-width:500px;transform:scale(.9);transition:transform .3s;border:1px solid var(--border)}.modal-overlay.show .modal-content{transform:scale(1)}.modal-header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border);padding-bottom:15px;margin-bottom:20px}.modal-header h2{margin:0;border:0;font-size:20px}.modal-close-btn{background:0 0;border:0;color:var(--text-secondary);font-size:24px;cursor:pointer;line-height:1}.modal-footer{display:flex;justify-content:flex-end;gap:12px;margin-top:25px}.time-quick-set-group,.data-quick-set-group{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}.btn-outline-secondary{background-color:transparent;border:1px solid var(--btn-secondary-bg);color:var(--text-secondary);padding:6px 10px;font-size:12px;font-weight:500}.btn-outline-secondary:hover{background-color:var(--btn-secondary-bg);color:#fff;border-color:var(--btn-secondary-bg)}.progress-bar-container{width:100%;background-color:#374151;border-radius:4px;height:8px;overflow:hidden;margin-top:4px}.progress-bar{height:100%;background-color:var(--success);transition:width .3s ease}.progress-bar.warning{background-color:var(--expired)}.progress-bar.danger{background-color:var(--danger)}.traffic-text{font-size:12px;color:var(--text-secondary);margin-top:4px;text-align:right}.dashboard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:30px}.dashboard-stat{background-color:var(--bg-card);padding:16px;border-radius:8px;border:1px solid var(--border);text-align:center}.dashboard-stat h3{font-size:28px;color:var(--accent);margin:0}.dashboard-stat p{color:var(--text-secondary);margin:0;font-size:14px}.search-container{margin-bottom:16px}.search-input{width:100%;padding:10px;border-radius:6px;background-color:#374151;border:1px solid #4B5563;color:var(--text-primary)}.table-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}.pagination{display:flex;justify-content:center;align-items:center;gap:8px;margin-top:24px}.pagination .btn{padding:6px 12px}.pagination span{color:var(--text-secondary);font-size:14px}.export-btn{background-color:#10B981;color:#fff}#statsChartContainer{margin-top:20px;position:relative;height:300px}</style></head><body><div class="container"><h1>Admin Dashboard</h1><div class="dashboard-grid" id="dashboardStats"></div><div id="statsChartContainer"><canvas id="statsChart"></canvas></div><div class="card"><h2>Create User</h2><form id="createUserForm" class="form-grid"><div class="form-group" style="grid-column:1/-1"><label for="uuid">UUID</label><div class="input-group"><input type="text" id="uuid" required><button type="button" id="generateUUID" class="btn btn-secondary">Generate</button></div></div><div class="form-group"><label for="expiryDate">Expiry Date</label><input type="date" id="expiryDate" required></div><div class="form-group"><label for="expiryTime">Expiry Time (Your Local Time)</label><input type="time" id="expiryTime" step="1" required><div class="label-note">Auto-converted to UTC.</div><div class="time-quick-set-group" data-target-date="expiryDate" data-target-time="expiryTime"><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="hour">+1 Hour</button><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="day">+1 Day</button><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="month">+1 Month</button></div></div><div class="form-group"><label for="dataLimit">Data Limit</label><div class="input-group"><input type="number" id="dataLimitValue" min="0" value="0" required><select id="dataLimitUnit"><option value="GB" selected>GB</option><option value="MB">MB</option><option value="TB">TB</option><option value="KB">KB</option></select><button type="button" class="btn btn-secondary" id="setUnlimitedCreate">Unlimited</button></div><div class="data-quick-set-group"><button type="button" class="btn btn-outline-secondary" data-gb="10">10GB</button><button type="button" class="btn btn-outline-secondary" data-gb="50">50GB</button><button type="button" class="btn btn-outline-secondary" data-gb="100">100GB</button></div></div><div class="form-group"><label for="notes">Notes</label><input type="text" id="notes" placeholder="(Optional)"></div><div class="form-group"><label>&nbsp;</label><button type="submit" class="btn btn-primary">Create User</button></div></form></div><div class="card" style="margin-top:30px"><h2>User List</h2><div class="search-container"><input type="text" id="searchInput" class="search-input" placeholder="Search by UUID or Notes..."></div><div class="table-header"><button id="deleteSelected" class="btn btn-danger">Delete Selected</button><button id="exportUsers" class="btn export-btn">Export to CSV</button></div><div style="overflow-x:auto"><table><thead><tr><th><input type="checkbox" id="selectAll"></th><th>UUID</th><th>Created</th><th>Expiry</th><th>Tehran Time</th><th>Status</th><th>Traffic</th><th>Notes</th><th>Actions</th></tr></thead><tbody id="userList"></tbody></table></div><div class="pagination" id="pagination"></div></div></div><div id="toast"></div><div id="editModal" class="modal-overlay"><div class="modal-content"><div class="modal-header"><h2>Edit User</h2><button id="modalCloseBtn" class="modal-close-btn">&times;</button></div><form id="editUserForm"><input type="hidden" id="editUuid" name="uuid"><div class="form-group"><label for="editExpiryDate">Expiry Date</label><input type="date" id="editExpiryDate" name="expiration_date" required></div><div class="form-group" style="margin-top:16px"><label for="editExpiryTime">Expiry Time (Local)</label><input type="time" id="editExpiryTime" name="expiration_time" step="1" required><div class="time-quick-set-group" data-target-date="editExpiryDate" data-target-time="editExpiryTime"><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="hour">+1 Hour</button><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="day">+1 Day</button><button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="month">+1 Month</button></div></div><div class="form-group" style="margin-top:16px"><label for="editDataLimit">Data Limit</label><div class="input-group"><input type="number" id="editDataLimitValue" min="0" required><select id="editDataLimitUnit"><option value="GB" selected>GB</option><option value="MB">MB</option><option value="TB">TB</option><option value="KB">KB</option></select><button type="button" class="btn btn-secondary" id="setUnlimitedEdit">Unlimited</button></div><div class="data-quick-set-group"><button type="button" class="btn btn-outline-secondary" data-gb="10">10GB</button><button type="button" class="btn btn-outline-secondary" data-gb="50">50GB</button><button type="button" class="btn btn-outline-secondary" data-gb="100">100GB</button></div></div><div class="form-group" style="margin-top:16px"><label for="editNotes">Notes</label><input type="text" id="editNotes" name="notes" placeholder="(Optional)"></div><div class="form-group" style="margin-top:16px"><label><input type="checkbox" id="resetTraffic" name="resetTraffic"> Reset Traffic Usage</label></div><div class="modal-footer"><button type="button" id="modalCancelBtn" class="btn btn-secondary">Cancel</button><button type="submit" class="btn btn-primary">Save Changes</button></div></form></div></div><script>/* SCRIPT_PLACEHOLDER */</script></body></html>`;
 
-// **FIX:** Added `ctx` parameter to ensure database operations complete.
 async function handleAdminRequest(request, env, ctx) {
     const url = new URL(request.url);
     const { pathname } = url;
@@ -599,12 +598,14 @@ async function handleAdminRequest(request, env, ctx) {
         
         try {
             if (pathname === '/admin/api/stats' && request.method === 'GET') {
-                return new Response(JSON.stringify(await fetchDashboardStats(env)), { status: 200, headers: jsonHeader });
+                const stats = await fetchDashboardStats(env);
+                return new Response(JSON.stringify(stats), { status: 200, headers: jsonHeader });
             }
 
             if (pathname === '/admin/api/users') {
                 if (request.method === 'GET') {
-                    const { results } = await env.DB.prepare("SELECT * FROM users ORDER BY created_at DESC").all();
+                    // **FIX:** Using 'd1' binding
+                    const { results } = await env.d1.prepare("SELECT * FROM users ORDER BY created_at DESC").all();
                     return new Response(JSON.stringify(results ?? []), { status: 200, headers: jsonHeader });
                 }
                 if (request.method === 'POST') {
@@ -613,13 +614,13 @@ async function handleAdminRequest(request, env, ctx) {
                          throw new Error('Invalid or missing fields. UUID, date, time, and data_limit are required.');
                     }
                     
-                    const dbPromise = env.DB.prepare("INSERT INTO users (uuid, expiration_date, expiration_time, data_limit, notes) VALUES (?, ?, ?, ?, ?)")
+                    // **FIX:** Using 'd1' binding
+                    const dbPromise = env.d1.prepare("INSERT INTO users (uuid, expiration_date, expiration_time, data_limit, notes) VALUES (?, ?, ?, ?, ?)")
                         .bind(uuid, expiration_date, expiration_time, data_limit ?? 0, notes || null)
                         .run();
                     
-                    // **FIX:** Use ctx.waitUntil to ensure the async database operation completes.
                     ctx.waitUntil(dbPromise);
-                    await dbPromise; // Also wait for the result before responding to the client.
+                    await dbPromise;
 
                     return new Response(JSON.stringify({ success: true, uuid }), { status: 201, headers: jsonHeader });
                 }
@@ -630,12 +631,13 @@ async function handleAdminRequest(request, env, ctx) {
                  if (!Array.isArray(uuids) || uuids.length === 0) throw new Error('UUIDs array is required.');
                  const validUuids = uuids.filter(isValidUUID);
                  
-                 const deletePromises = validUuids.map(uuid => env.DB.prepare("DELETE FROM users WHERE uuid = ?").bind(uuid));
+                 // **FIX:** Using 'd1' binding
+                 const deletePromises = validUuids.map(uuid => env.d1.prepare("DELETE FROM users WHERE uuid = ?").bind(uuid));
                  const kvPromises = validUuids.map(uuid => env.USER_KV.delete(`user:${uuid}`));
 
-                 const dbPromise = env.DB.batch(deletePromises);
+                 // **FIX:** Using 'd1' binding
+                 const dbPromise = env.d1.batch(deletePromises);
                  
-                 // **FIX:** Use ctx.waitUntil to ensure all operations complete.
                  ctx.waitUntil(Promise.all([dbPromise, ...kvPromises]));
                  await dbPromise;
 
@@ -652,22 +654,22 @@ async function handleAdminRequest(request, env, ctx) {
                     if (!expiration_date || !expiration_time || data_limit === undefined) throw new Error('Invalid or missing fields. Date, time, and data_limit are required.');
                     
                     let query = "UPDATE users SET expiration_date = ?, expiration_time = ?, data_limit = ?, notes = ?" + (reset_traffic ? ", used_traffic = 0" : "") + " WHERE uuid = ?";
-                    const dbPromise = env.DB.prepare(query)
+                    // **FIX:** Using 'd1' binding
+                    const dbPromise = env.d1.prepare(query)
                         .bind(expiration_date, expiration_time, data_limit ?? 0, notes || null, uuid)
                         .run();
                     const kvPromise = env.USER_KV.delete(`user:${uuid}`);
 
-                    // **FIX:** Use ctx.waitUntil to ensure all operations complete.
                     ctx.waitUntil(Promise.all([dbPromise, kvPromise]));
                     await dbPromise;
                     
                     return new Response(JSON.stringify({ success: true, uuid }), { status: 200, headers: jsonHeader });
                 }
                 if (request.method === 'DELETE') {
-                    const dbPromise = env.DB.prepare("DELETE FROM users WHERE uuid = ?").bind(uuid).run();
+                    // **FIX:** Using 'd1' binding
+                    const dbPromise = env.d1.prepare("DELETE FROM users WHERE uuid = ?").bind(uuid).run();
                     const kvPromise = env.USER_KV.delete(`user:${uuid}`);
                     
-                    // **FIX:** Use ctx.waitUntil to ensure all operations complete.
                     ctx.waitUntil(Promise.all([dbPromise, kvPromise]));
                     await dbPromise;
 
@@ -757,7 +759,7 @@ function generateBeautifulConfigPage(userID, hostName, proxyAddress, expDate, ex
 }
 
 function generateRandomPath(length = 12, query = '') {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012456789';
     let result = '';
     for (let i = 0; i < length; i++) result += chars.charAt(Math.floor(Math.random() * chars.length));
     return `/${result}${query ? `?${query}` : ''}`;
@@ -985,7 +987,6 @@ export default {
             const url = new URL(request.url);
 
             if (url.pathname.startsWith('/admin')) {
-                // **FIX:** Pass the execution context `ctx` to the admin handler.
                 return handleAdminRequest(request, env, ctx);
             }
 
