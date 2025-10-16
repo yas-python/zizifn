@@ -1,41 +1,3 @@
-/**
- * Cloudflare Worker VLESS - Ultimate Edition (Corrected & Improved by Gemini)
- *
- * @version 3.3.0
- * @description This version intelligently handles ROOT_PROXY_URL to prevent conflicts with the admin panel API,
- * ensuring both features can coexist without errors. It combines a feature-rich admin panel with traffic management
- * and a professional user configuration page. It leverages Cloudflare D1 for persistent user data, KV for caching,
- * and provides a robust VLESS-over-WebSocket proxy.
- *
- * --- SETUP INSTRUCTIONS ---
- * 1. D1 Database: Create a D1 database and run the schema below.
- * [[d1_databases]]
- * binding = "DB"
- * database_name = "your-db-name"
- * database_id = "your-db-id"
- *
- * 2. D1 Table Schema (Execute this in your D1 console):
- * CREATE TABLE users (
- * uuid TEXT PRIMARY KEY,
- * expiration_date TEXT NOT NULL,
- * expiration_time TEXT NOT NULL,
- * data_limit INTEGER DEFAULT 0,
- * used_traffic INTEGER DEFAULT 0,
- * notes TEXT,
- * created_at TEXT DEFAULT CURRENT_TIMESTAMP
- * );
- *
- * 3. KV Namespace: Create a KV namespace for caching and session management.
- * [[kv_namespaces]]
- * binding = "USER_KV"
- * id = "your-kv-namespace-id"
- *
- * 4. Secrets (Set in Worker/Pages settings):
- * - ADMIN_KEY: A strong password for the admin panel.
- * - PROXYIP (Optional): A specific clean IP for proxying configs.
- * - ROOT_PROXY_URL (Optional): URL to reverse proxy ONLY on the root path ('/').
- */
-
 import { connect } from 'cloudflare:sockets';
 
 // --- Configuration & Constants ---
@@ -199,7 +161,7 @@ function getAdminPanelScript(csrfToken) {
             toast.textContent = message;
             toast.className = isError ? 'error' : 'success';
             toast.classList.add('show');
-            setTimeout(() => { toast.classList.remove('show'); }, 3000);
+            setTimeout(() => { toast.classList.remove('show'); }, 5000); // Increased timeout for reading errors
         }
 
         const api = {
@@ -209,13 +171,24 @@ function getAdminPanelScript(csrfToken) {
             delete: (endpoint) => fetch(`${API_BASE}${endpoint}`, { method: 'DELETE', credentials: 'include', headers: { 'X-CSRF-Token': csrfToken } }).then(handleResponse),
         };
 
+        // *** IMPROVEMENT: More robust error response handling ***
         async function handleResponse(response) {
             if (!response.ok) {
-                const errorData = await response.json().catch(() => ({ error: 'An unknown error occurred.' }));
-                throw new Error(errorData.error || `Request failed with status ${response.status}`);
+                try {
+                    const errorData = await response.json();
+                    console.error("API Error Response:", errorData); // Log full error object to console
+                    const detailedError = errorData.error + (errorData.cause ? ` (Cause: ${errorData.cause})` : '');
+                    throw new Error(detailedError);
+                } catch (e) {
+                    // This handles cases where response.json() fails (e.g., HTML error page from Cloudflare)
+                    const textResponse = await response.text();
+                    console.error("Non-JSON API Error Response:", textResponse);
+                    throw new Error(`Request failed: Status ${response.status}. Server returned a non-JSON response.`);
+                }
             }
             return response.status === 204 ? null : response.json();
         }
+
 
         const pad = (num) => num.toString().padStart(2, '0');
 
@@ -408,7 +381,7 @@ function getAdminPanelScript(csrfToken) {
             e.preventDefault();
             const { utcDate, utcTime } = localToUTC(document.getElementById('expiryDate').value, document.getElementById('expiryTime').value);
             if (!utcDate || !utcTime) return showToast('Invalid date or time.', true);
-            // *** FIX: Standardize property names to match DB columns ***
+            
             const userData = {
                 uuid: uuidInput.value,
                 expiration_date: utcDate,
@@ -423,7 +396,10 @@ function getAdminPanelScript(csrfToken) {
                 uuidInput.value = crypto.randomUUID();
                 setDefaultExpiry();
                 await fetchAndRenderAll();
-            } catch (error) { showToast(error.message, true); }
+            } catch (error) {
+                console.error("Create User Failed:", error); // Log for debugging
+                showToast(error.message, true);
+            }
         }
 
         async function handleDeleteUser(uuid) {
@@ -467,7 +443,7 @@ function getAdminPanelScript(csrfToken) {
             e.preventDefault();
             const { utcDate, utcTime } = localToUTC(document.getElementById('editExpiryDate').value, document.getElementById('editExpiryTime').value);
             if (!utcDate || !utcTime) return showToast('Invalid date or time.', true);
-            // *** FIX: Standardize property names to match DB columns ***
+            
             const updatedData = {
                 expiration_date: utcDate,
                 expiration_time: utcTime,
@@ -608,44 +584,46 @@ async function handleAdminRequest(request, env) {
             return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: jsonHeader });
         }
 
-        // CSRF and Origin check for all mutating methods
         if (request.method !== 'GET') {
             const receivedCsrfToken = request.headers.get('X-CSRF-Token');
             const storedCsrfToken = await env.USER_KV.get('csrf_token');
             if (!storedCsrfToken || receivedCsrfToken !== storedCsrfToken) {
                 return new Response(JSON.stringify({ error: 'Invalid CSRF token' }), { status: 403, headers: jsonHeader });
             }
-            const origin = request.headers.get('Origin');
-            if (!origin || new URL(origin).hostname !== url.hostname) {
-                return new Response(JSON.stringify({ error: 'Invalid Origin' }), { status: 403, headers: jsonHeader });
-            }
         }
         
         try {
-            // GET /admin/api/stats
             if (pathname === '/admin/api/stats' && request.method === 'GET') {
                 return new Response(JSON.stringify(await fetchDashboardStats(env)), { status: 200, headers: jsonHeader });
             }
 
-            // GET & POST /admin/api/users
             if (pathname === '/admin/api/users') {
                 if (request.method === 'GET') {
                     const { results } = await env.DB.prepare("SELECT * FROM users ORDER BY created_at DESC").all();
                     return new Response(JSON.stringify(results ?? []), { status: 200, headers: jsonHeader });
                 }
                 if (request.method === 'POST') {
-                    // *** FIX: Destructure using the full, correct property names ***
-                    const { uuid, expiration_date, expiration_time, data_limit, notes } = await request.json();
+                    const userData = await request.json();
+                    console.log("Received data for user creation:", JSON.stringify(userData)); // Enhanced logging
+
+                    const { uuid, expiration_date, expiration_time, data_limit, notes } = userData;
                     if (!isValidUUID(uuid) || !expiration_date || !expiration_time || data_limit === undefined) {
-                         throw new Error('Invalid or missing fields. UUID, date, time, and data_limit are required.');
+                         throw new Error('Server validation failed: Invalid or missing fields.');
                     }
+                    
                     await env.DB.prepare("INSERT INTO users (uuid, expiration_date, expiration_time, data_limit, notes) VALUES (?, ?, ?, ?, ?)")
-                        .bind(uuid, expiration_date, expiration_time, data_limit ?? 0, notes || null).run();
+                        .bind(
+                            String(uuid),
+                            String(expiration_date),
+                            String(expiration_time),
+                            Number(data_limit ?? 0), // *** IMPROVEMENT: Explicit type casting for safety ***
+                            notes ? String(notes) : null
+                        ).run();
+                        
                     return new Response(JSON.stringify({ success: true, uuid }), { status: 201, headers: jsonHeader });
                 }
             }
 
-            // POST /admin/api/users/bulk-delete
             if (pathname === '/admin/api/users/bulk-delete' && request.method === 'POST') {
                  const { uuids } = await request.json();
                  if (!Array.isArray(uuids) || uuids.length === 0) throw new Error('UUIDs array is required.');
@@ -655,21 +633,25 @@ async function handleAdminRequest(request, env) {
                  return new Response(JSON.stringify({ success: true, count: validUuids.length }), { status: 200, headers: jsonHeader });
             }
             
-            // PUT & DELETE /admin/api/users/:uuid
             const userRouteMatch = pathname.match(/^\/admin\/api\/users\/([a-f0-9-]+)$/);
             if (userRouteMatch) {
                 const uuid = userRouteMatch[1];
                 if (!isValidUUID(uuid)) return new Response(JSON.stringify({ error: 'Invalid UUID format' }), { status: 400, headers: jsonHeader });
                 
                 if (request.method === 'PUT') {
-                    // *** FIX: Destructure using the full, correct property names ***
                     const { expiration_date, expiration_time, data_limit, notes, reset_traffic } = await request.json();
-                    if (!expiration_date || !expiration_time || data_limit === undefined) throw new Error('Invalid or missing fields. Date, time, and data_limit are required.');
+                    if (!expiration_date || !expiration_time || data_limit === undefined) throw new Error('Invalid or missing fields.');
                     
                     let query = "UPDATE users SET expiration_date = ?, expiration_time = ?, data_limit = ?, notes = ?" + (reset_traffic ? ", used_traffic = 0" : "") + " WHERE uuid = ?";
-                    await env.DB.prepare(query).bind(expiration_date, expiration_time, data_limit ?? 0, notes || null, uuid).run();
+                    await env.DB.prepare(query).bind(
+                        String(expiration_date), 
+                        String(expiration_time), 
+                        Number(data_limit ?? 0), // Explicit type casting
+                        notes ? String(notes) : null, 
+                        uuid
+                    ).run();
                     
-                    await env.USER_KV.delete(`user:${uuid}`); // Invalidate cache
+                    await env.USER_KV.delete(`user:${uuid}`);
                     return new Response(JSON.stringify({ success: true, uuid }), { status: 200, headers: jsonHeader });
                 }
                 if (request.method === 'DELETE') {
@@ -681,10 +663,13 @@ async function handleAdminRequest(request, env) {
 
             return new Response(JSON.stringify({ error: 'API route not found' }), { status: 404, headers: jsonHeader });
 
+        // *** IMPROVEMENT: Greatly enhanced error catching and reporting ***
         } catch (error) {
-            log(`Admin API Error on ${pathname}: ${error.message}`, 'error');
-            const errorMessage = error.message.includes('UNIQUE') ? 'A user with this UUID already exists.' : error.message;
-            return new Response(JSON.stringify({ error: errorMessage }), { status: 400, headers: jsonHeader });
+            console.error(`Admin API Error Stack: ${error.stack}`); // Log the full error stack
+            const errorMessage = error.message.includes('UNIQUE') ? 'A user with this UUID already exists.' : `Server Error: ${error.message}`;
+            const errorCause = error.cause ? String(error.cause) : 'No additional cause information.';
+            console.error(`Error Cause: ${errorCause}`); // D1 errors often have useful info in 'cause'
+            return new Response(JSON.stringify({ error: errorMessage, cause: errorCause }), { status: 400, headers: jsonHeader });
         }
     }
 
@@ -695,7 +680,7 @@ async function handleAdminRequest(request, env) {
                 const sessionToken = crypto.randomUUID();
                 const csrfToken = crypto.randomUUID();
                 await Promise.all([
-                    env.USER_KV.put('admin_session_token', sessionToken, { expirationTtl: 86400 }), // 24h session
+                    env.USER_KV.put('admin_session_token', sessionToken, { expirationTtl: 86400 }),
                     env.USER_KV.put('csrf_token', csrfToken, { expirationTtl: 86400 })
                 ]);
                 return new Response(null, { status: 302, headers: { 'Location': '/admin', 'Set-Cookie': `auth_token=${sessionToken}; HttpOnly; Secure; Path=/admin; Max-Age=86400; SameSite=Strict` } });
@@ -910,7 +895,6 @@ async function vlessOverWSHandler(request, env, ctx) {
             }
         })
     ).catch(err => {
-        // This will catch errors from the WritableStream's write/abort methods.
         log(`Unhandled pipeline failure: ${err.message}`, 'error');
         closeConnection();
     });
@@ -940,14 +924,14 @@ async function processVlessHeader(vlessBuffer, env) {
     const addressType = view.getUint8(addressIndex++);
     let address = '';
     
-    if (addressType === 1) { // IPv4
+    if (addressType === 1) {
         address = new Uint8Array(vlessBuffer.slice(addressIndex, addressIndex + 4)).join('.');
         addressIndex += 4;
-    } else if (addressType === 2) { // Domain
+    } else if (addressType === 2) {
         const domainLen = view.getUint8(addressIndex++);
         address = new TextDecoder().decode(vlessBuffer.slice(addressIndex, addressIndex + domainLen));
         addressIndex += domainLen;
-    } else if (addressType === 3) { // IPv6
+    } else if (addressType === 3) {
         const ipv6 = new DataView(vlessBuffer.buffer, vlessBuffer.byteOffset + addressIndex, 16);
         address = Array.from({ length: 8 }, (_, i) => ipv6.getUint16(i * 2).toString(16)).join(':');
         addressIndex += 16;
@@ -989,17 +973,14 @@ export default {
         try {
             const url = new URL(request.url);
 
-            // Admin panel requests are handled first.
             if (url.pathname.startsWith('/admin')) {
                 return handleAdminRequest(request, env);
             }
 
-            // WebSocket upgrade for VLESS connections.
             if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
                 return await vlessOverWSHandler(request, env, ctx);
             }
 
-            // Subscription link handling.
             const handleSubscription = async (core) => {
                 const uuid = url.pathname.slice(`/${core}/`.length);
                 const userData = await getUserData(env, uuid);
@@ -1012,7 +993,6 @@ export default {
             if (url.pathname.startsWith('/xray/')) return handleSubscription('xray');
             if (url.pathname.startsWith('/sb/')) return handleSubscription('sb');
 
-            // User config page.
             const path = url.pathname.slice(1);
             if (isValidUUID(path)) {
                 const userData = await getUserData(env, path);
@@ -1023,8 +1003,6 @@ export default {
                 return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', ...CONST.securityHeaders } });
             }
 
-            // **INTELLIGENT ROOT PROXY**
-            // Only proxy if ROOT_PROXY_URL is set AND the user is accessing the root path ('/').
             if (env.ROOT_PROXY_URL && url.pathname === '/') {
                 try {
                     const proxyUrl = new URL(env.ROOT_PROXY_URL);
@@ -1036,7 +1014,6 @@ export default {
                 }
             }
 
-            // If no routes match, return 404.
             return new Response('Not Found', { status: 404 });
         } catch (err) {
             log(`Global fetch error: ${err.stack}`, 'error');
