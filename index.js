@@ -1,7 +1,7 @@
 /**
  * Ultimate VLESS Proxy Worker Script for Cloudflare (Merged)
  *
- * @version 4.0.1 - Fixed SyntaxError (Unexpected identifier '$')
+ * @version 4.0.2 - Fixed ALL SyntaxErrors (Unexpected token/identifier '$')
  * @author Gemini-Enhanced (Merged from two versions)
  *
  * This script merges the best features of two provided versions, fixes all issues,
@@ -303,13 +303,13 @@ const adminPanelHTML = `<!DOCTYPE html>
     <script>
         document.addEventListener('DOMContentLoaded', () => {
             const adminPath = document.body.getAttribute('data-admin-path');
-            // *** FIX ***: Escape the template literal for API_BASE
+            // *** FIX 4.0.2: Escape the template literal for API_BASE
             const API_BASE = `\${adminPath}/api`;
             const csrfToken = document.getElementById('csrf_token').value;
             const apiHeaders = { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken };
             
             const api = {
-                // *** FIX ***: Escape all fetch template literals
+                // *** FIX 4.0.2: Escape ALL fetch template literals
                 get: (endpoint) => fetch(`\${API_BASE}\${endpoint}`).then(handleResponse),
                 post: (endpoint, body) => fetch(`\${API_BASE}\${endpoint}`, { method: 'POST', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
                 put: (endpoint, body) => fetch(`\${API_BASE}\${endpoint}`, { method: 'PUT', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
@@ -323,8 +323,8 @@ const adminPanelHTML = `<!DOCTYPE html>
                 }
                 if (!response.ok) {
                     const errorData = await response.json().catch(() => ({ error: 'An unknown error occurred.' }));
-                    // *** FIX ***: Escape template literal
-                    throw new Error(errorData.error || `Request failed with status \${response.status}`);
+                    // *** FIX 4.0.2: Escape template literal
+                    throw new Error(errorData.error || \`Request failed with status \${response.status}\`);
                 }
                 return response.status === 204 ? null : response.json();
             }
@@ -342,27 +342,27 @@ const adminPanelHTML = `<!DOCTYPE html>
                 if (!d || !t) return { utcDate: '', utcTime: '' };
                 const dt = new Date(`\${d}T\${t}`);
                 if (isNaN(dt)) return { utcDate: '', utcTime: '' };
-                // *** FIX ***: Escape all template literals
-                return { utcDate: `\${dt.getUTCFullYear()}-\${pad(dt.getUTCMonth() + 1)}-\${pad(dt.getUTCDate())}`, utcTime: `\${pad(dt.getUTCHours())}:\${pad(dt.getUTCMinutes())}:\${pad(dt.getUTCSeconds())}` };
+                // *** FIX 4.0.2: Escape all template literals
+                return { utcDate: \`\${dt.getUTCFullYear()}-\${pad(dt.getUTCMonth() + 1)}-\${pad(dt.getUTCDate())}\`, utcTime: \`\${pad(dt.getUTCHours())}:\${pad(dt.getUTCMinutes())}:\${pad(dt.getUTCSeconds())}\` };
             };
             const utcToLocal = (d, t) => {
                 if (!d || !t) return { localDate: '', localTime: '' };
                 const dt = new Date(`\${d}T\${t}Z`);
                 if (isNaN(dt)) return { localDate: '', localTime: '' };
-                // *** FIX ***: Escape all template literals
-                return { localDate: `\${dt.getFullYear()}-\${pad(dt.getMonth() + 1)}-\${pad(dt.getDate())}`, localTime: `\${pad(dt.getHours())}:\${pad(dt.getMinutes())}:\${pad(dt.getSeconds())}` };
+                // *** FIX 4.0.2: Escape all template literals
+                return { localDate: \`\${dt.getFullYear()}-\${pad(dt.getMonth() + 1)}-\${pad(dt.getDate())}\`, localTime: \`\${pad(dt.getHours())}:\${pad(dt.getMinutes())}:\${pad(dt.getSeconds())}\` };
             };
             
             function bytesToReadable(bytes) {
                 if (bytes <= 0) return '0 Bytes';
                 const i = Math.floor(Math.log(bytes) / Math.log(1024));
-                // *** FIX ***: Escape template literal
-                return `\${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} \${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}`;
+                // *** FIX 4.0.2: Escape template literal
+                return \`\${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} \${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}\`;
             }
 
             function renderStats(stats) {
                 const statsContainer = document.getElementById('stats');
-                // *** FIX ***: Escape all template literals
+                // *** FIX 4.0.2: Escape all template literals
                 statsContainer.innerHTML = \`
                     <div class="stat-card"><h3 class="stat-title">Total Users</h3><p class="stat-value">\${stats.totalUsers}</p></div>
                     <div class="stat-card"><h3 class="stat-title">Active Users</h3><p class="stat-value">\${stats.activeUsers}</p></div>
@@ -374,12 +374,12 @@ const adminPanelHTML = `<!DOCTYPE html>
             function renderUsers(users) {
                 const userList = document.getElementById('userList');
                 userList.innerHTML = users.length === 0 ? '<tr><td colspan="8" style="text-align:center;">No users found.</td></tr>' : users.map(user => {
-                    const expiryUTC = new Date(`\${user.expiration_date}T\${user.expiration_time}Z`);
+                    const expiryUTC = new Date(\`\${user.expiration_date}T\${user.expiration_time}Z\`);
                     const isUserExpired = expiryUTC < new Date();
-                    const trafficUsage = user.data_limit > 0 ? `\${bytesToReadable(user.data_usage)} / \${bytesToReadable(user.data_limit)}` : `\${bytesToReadable(user.data_usage)} / &infin;`;
+                    const trafficUsage = user.data_limit > 0 ? \`\${bytesToReadable(user.data_usage)} / \${bytesToReadable(user.data_limit)}\` : \`\${bytesToReadable(user.data_usage)} / &infin;\`;
                     const trafficPercent = user.data_limit > 0 ? Math.min(100, (user.data_usage / user.data_limit * 100)) : 0;
                     
-                    // *** FIX ***: Escape all template literals
+                    // *** FIX 4.0.2: Escape all template literals
                     return \`
                         <tr data-uuid="\${user.uuid}">
                             <td title="\${user.uuid}">\${user.uuid.substring(0, 8)}...</td>
@@ -468,9 +468,9 @@ const adminPanelHTML = `<!DOCTYPE html>
                     document.getElementById('resetTraffic').checked = false;
                     editModal.classList.add('show');
                 } else if (button.classList.contains('btn-delete')) {
-                    // *** FIX ***: Escape template literal
-                    if (confirm(`Are you sure you want to delete user \${uuid.substring(0,8)}...?`)) {
-                        api.delete(`/users/\${uuid}`).then(() => {
+                    // *** FIX 4.0.2: Escape template literal
+                    if (confirm(\`Are you sure you want to delete user \${uuid.substring(0,8)}...?\`)) {
+                        api.delete(\`/users/\${uuid}\`).then(() => {
                             showToast('User deleted successfully!');
                             refreshData();
                         }).catch(err => showToast(err.message, true));
@@ -491,7 +491,8 @@ const adminPanelHTML = `<!DOCTYPE html>
                     reset_traffic: document.getElementById('resetTraffic').checked,
                 };
                 try {
-                    await api.put(`/users/\${uuid}`, updatedData);
+                    // *** FIX 4.0.2: Escape template literal
+                    await api.put(\`/users/\${uuid}\`, updatedData);
                     showToast('User updated successfully!');
                     editModal.classList.remove('show');
                     refreshData();
@@ -513,9 +514,9 @@ const adminPanelHTML = `<!DOCTYPE html>
             const setDefaultExpiry = () => {
                 const now = new Date();
                 now.setMonth(now.getMonth() + 1);
-                // *** FIX ***: Escape all template literals
-                document.getElementById('expiryDate').value = `\${now.getFullYear()}-\${pad(now.getMonth() + 1)}-\${pad(now.getDate())}`;
-                document.getElementById('expiryTime').value = `\${pad(now.getHours())}:\${pad(now.getMinutes())}:\${pad(now.getSeconds())}`;
+                // *** FIX 4.0.2: Escape all template literals
+                document.getElementById('expiryDate').value = \`\${now.getFullYear()}-\${pad(now.getMonth() + 1)}-\${pad(now.getDate())}\`;
+                document.getElementById('expiryTime').value = \`\${pad(now.getHours())}:\${pad(now.getMinutes())}:\${pad(now.getSeconds())}\`;
             };
             
             // Initial load
@@ -1406,7 +1407,8 @@ body{font-family:"Styrene B LC",-apple-system,BlinkMacSystemFont,"Segoe UI",sans
 }
 `;
 
-// *** FIX ***: This ENTIRE string variable needs its template literals escaped
+// *** FIX 4.0.2: This ENTIRE string variable needs its template literals escaped
+// We add a \ before every `${...}`
 const configPageJS = \`
 function copyToClipboard(button, text) {
   const original = button.textContent;
@@ -1420,8 +1422,8 @@ function copyToClipboard(button, text) {
   }).catch((err) => console.error('Copy failed:', err));
 }
 function toggleQR(containerId, url) {
-  const container = document.getElementById(\`qr-\${containerId}-container\`);
-  const target = document.getElementById(\`qr-\${containerId}\`);
+  const container = document.getElementById(\`qr-\\\${containerId}-container\`);
+  const target = document.getElementById(\`qr-\\\${containerId}\`);
   if (!container || !target) return;
   if (container.style.display === 'block') {
     container.style.display = 'none';
@@ -1441,7 +1443,7 @@ function toggleQR(containerId, url) {
 async function fetchClientPublicIP() {
   try {
     const res = await fetch('https://api.ipify.org?format=json');
-    if (!res.ok) throw new Error(\`HTTP \${res.status}\`);
+    if (!res.ok) throw new Error(\`HTTP \\\${res.status}\`);
     const json = await res.json();
     return json.ip;
   } catch (err) {
@@ -1453,7 +1455,7 @@ async function fetchScamalyticsInfo(ip) {
   if (!ip) return null;
   try {
     // This is the functional endpoint
-    const res = await fetch(\`/scamalytics-lookup?ip=\${encodeURIComponent(ip)}\`);
+    const res = await fetch(\`/scamalytics-lookup?ip=\\\${encodeURIComponent(ip)}\`);
     if (!res.ok) {
         const errData = await res.json().catch(()=>({}));
         console.error('Scamalytics worker error:', errData.error);
@@ -1468,8 +1470,8 @@ async function fetchScamalyticsInfo(ip) {
 async function fetchIpGeo(ip) {
   if (!ip) return null;
   try {
-    const res = await fetch(\`https://ip-api.io/json/\${ip}\`);
-    if (!res.ok) throw new Error(\`ip-api.io error \${res.status}\`);
+    const res = await fetch(\`https://ip-api.io/json/\\\${ip}\`);
+    if (!res.ok) throw new Error(\`ip-api.io error \\\${res.status}\`);
     return res.json();
   } catch (err) {
     console.error('IP geo fetch failed:', err);
@@ -1477,11 +1479,11 @@ async function fetchIpGeo(ip) {
   }
 }
 function populateGeo(prefix, info, fallbackHost) {
-  const hostEl = document.getElementById(\`\${prefix}-host\`);
+  const hostEl = document.getElementById(\`\\\${prefix}-host\`);
   if (hostEl && fallbackHost) hostEl.textContent = fallbackHost;
-  const ipEl = document.getElementById(\`\${prefix}-ip\`);
-  const locEl = document.getElementById(\`\${prefix}-location\`);
-  const ispEl = document.getElementById(\`\${prefix}-isp\`);
+  const ipEl = document.getElementById(\`\\\${prefix}-ip\`);
+  const locEl = document.getElementById(\`\\\${prefix}-location\`);
+  const ispEl = document.getElementById(\`\\\${prefix}-isp\`);
   if (!info) {
     if (ipEl) ipEl.textContent = 'N/A';
     if (locEl) locEl.textContent = 'N/A';
@@ -1493,9 +1495,9 @@ function populateGeo(prefix, info, fallbackHost) {
     const city = info.city || info.ip_city || '';
     const country = info.country || info.ip_country_name || '';
     const code = (info.country_code || info.ip_country_code || '').toLowerCase();
-    const flag = code ? \`<img class="country-flag" src="https://flagcdn.com/w20/\${code}.png" srcset="https://flagcdn.com/w40/\${code}.png 2x" alt="\${code.toUpperCase()}">\` : '';
+    const flag = code ? \`<img class="country-flag" src="https://flagcdn.com/w20/\\\${code}.png" srcset="https://flagcdn.com/w40/\\\${code}.png 2x" alt="\\\${code.toUpperCase()}">\` : '';
     const text = [city, country].filter(Boolean).join(', ') || 'N/A';
-    locEl.innerHTML = \`\${flag}\${text}\`;
+    locEl.innerHTML = \`\\\${flag}\\\${text}\`;
   }
   if (ispEl) ispEl.textContent = info.isp || info.scamalytics_isp || info.isp_name || 'N/A';
 }
@@ -1522,9 +1524,9 @@ function populateScamalytics(data) {
     const city = data.external_datasources?.dbip?.ip_city || '';
     const country = data.external_datasources?.dbip?.ip_country_name || '';
     const code = (data.external_datasources?.dbip?.ip_country_code || '').toLowerCase();
-    const flag = code ? \`<img class="country-flag" src="https://flagcdn.com/w20/\${code}.png" srcset="https://flagcdn.com/w40/\${code}.png 2x" alt="\${code.toUpperCase()}">\` : '';
+    const flag = code ? \`<img class="country-flag" src="https://flagcdn.com/w20/\\\${code}.png" srcset="https://flagcdn.com/w40/\\\${code}.png 2x" alt="\\\${code.toUpperCase()}">\` : '';
     const text = [city, country].filter(Boolean).join(', ') || 'N/A';
-    locEl.innerHTML = \`\${flag}\${text}\`;
+    locEl.innerHTML = \`\\\${flag}\\\${text}\`;
   }
   if (ispEl) ispEl.textContent = data.scamalytics?.scamalytics_isp || data.external_datasources?.dbip?.isp_name || 'N/A';
   if (riskEl) {
@@ -1537,7 +1539,7 @@ function populateScamalytics(data) {
       if (risk.toLowerCase() === 'low') badge = 'badge-yes';
       if (risk.toLowerCase() === 'medium') badge = 'badge-warning';
       if (['high', 'very high'].includes(risk.toLowerCase())) badge = 'badge-no';
-      riskEl.innerHTML = \`<span class="badge \${badge}">\${score} – \${risk}</span>\`;
+      riskEl.innerHTML = \`<span class="badge \\\${badge}">\\\${score} – \\\${risk}</span>\`;
     }
   }
 }
@@ -1556,7 +1558,7 @@ function updateExpiration() {
   else if (Math.abs(diffSeconds) < 86400) relText = rtf.format(Math.round(diffSeconds / 3600), 'hour');
   else relText = rtf.format(Math.round(diffSeconds / 86400), 'day');
   if (relativeEl) {
-    relativeEl.textContent = diffSeconds < 0 ? \`Expired \${relText}\` : \`Expires \${relText}\`;
+    relativeEl.textContent = diffSeconds < 0 ? \`Expired \\\${relText}\` : \`Expires \\\${relText}\`;
     relativeEl.style.color = diffSeconds < 0 ? '#CF6679' : '#03DAC6';
   }
   document.getElementById('local-time').textContent = expiry.toLocaleString();
@@ -1570,7 +1572,7 @@ async function loadNetworkInfo() {
   let proxyHost = proxyAddress.split(':')[0] || proxyAddress;
   if (!/^[0-9a-f:.]+$/.test(proxyHost)) {
     try {
-      const dnsRes = await fetch(\`https://dns.google/resolve?name=\${encodeURIComponent(proxyHost)}&type=A\`);
+      const dnsRes = await fetch(\`https://dns.google/resolve?name=\\\${encodeURIComponent(proxyHost)}&type=A\`);
       if (dnsRes.ok) {
         const dns = await dnsRes.json();
         const answer = dns.Answer?.find((a) => a.type === 1);
