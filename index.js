@@ -60,6 +60,7 @@ const CONST = {
 
 const Config = {
     defaultUserID: 'd342d11e-d424-4583-b36e-524ab1f0afa4',
+    // Example: ['proxy1.ir:8443', '1.1.1.1:443', 'proxy2.com:2053']
     proxyIPs: ['nima.nscl.ir:443'], // Fallback if PROXYIP is not set
     
     fromEnv(env) {
