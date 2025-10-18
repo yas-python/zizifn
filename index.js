@@ -1,7 +1,7 @@
 /**
  * Ultimate VLESS Proxy Worker Script for Cloudflare (Merged)
  *
- * @version 4.0.0
+ * @version 4.0.1 - Fixed SyntaxError (Unexpected identifier '$')
  * @author Gemini-Enhanced (Merged from two versions)
  *
  * This script merges the best features of two provided versions, fixes all issues,
@@ -303,15 +303,17 @@ const adminPanelHTML = `<!DOCTYPE html>
     <script>
         document.addEventListener('DOMContentLoaded', () => {
             const adminPath = document.body.getAttribute('data-admin-path');
-            const API_BASE = `${adminPath}/api`;
+            // *** FIX ***: Escape the template literal for API_BASE
+            const API_BASE = `\${adminPath}/api`;
             const csrfToken = document.getElementById('csrf_token').value;
             const apiHeaders = { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken };
             
             const api = {
-                get: (endpoint) => fetch(`${API_BASE}${endpoint}`).then(handleResponse),
-                post: (endpoint, body) => fetch(`${API_BASE}${endpoint}`, { method: 'POST', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
-                put: (endpoint, body) => fetch(`${API_BASE}${endpoint}`, { method: 'PUT', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
-                delete: (endpoint) => fetch(`${API_BASE}${endpoint}`, { method: 'DELETE', headers: apiHeaders }).then(handleResponse),
+                // *** FIX ***: Escape all fetch template literals
+                get: (endpoint) => fetch(`\${API_BASE}\${endpoint}`).then(handleResponse),
+                post: (endpoint, body) => fetch(`\${API_BASE}\${endpoint}`, { method: 'POST', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
+                put: (endpoint, body) => fetch(`\${API_BASE}\${endpoint}`, { method: 'PUT', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
+                delete: (endpoint) => fetch(`\${API_BASE}\${endpoint}`, { method: 'DELETE', headers: apiHeaders }).then(handleResponse),
             };
             
             async function handleResponse(response) {
@@ -321,7 +323,8 @@ const adminPanelHTML = `<!DOCTYPE html>
                 }
                 if (!response.ok) {
                     const errorData = await response.json().catch(() => ({ error: 'An unknown error occurred.' }));
-                    throw new Error(errorData.error || `Request failed with status ${response.status}`);
+                    // *** FIX ***: Escape template literal
+                    throw new Error(errorData.error || `Request failed with status \${response.status}`);
                 }
                 return response.status === 204 ? null : response.json();
             }
@@ -337,53 +340,58 @@ const adminPanelHTML = `<!DOCTYPE html>
             const pad = num => num.toString().padStart(2, '0');
             const localToUTC = (d, t) => {
                 if (!d || !t) return { utcDate: '', utcTime: '' };
-                const dt = new Date(`${d}T${t}`);
+                const dt = new Date(`\${d}T\${t}`);
                 if (isNaN(dt)) return { utcDate: '', utcTime: '' };
-                return { utcDate: `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`, utcTime: `${pad(dt.getUTCHours())}:${pad(dt.getUTCMinutes())}:${pad(dt.getUTCSeconds())}` };
+                // *** FIX ***: Escape all template literals
+                return { utcDate: `\${dt.getUTCFullYear()}-\${pad(dt.getUTCMonth() + 1)}-\${pad(dt.getUTCDate())}`, utcTime: `\${pad(dt.getUTCHours())}:\${pad(dt.getUTCMinutes())}:\${pad(dt.getUTCSeconds())}` };
             };
             const utcToLocal = (d, t) => {
                 if (!d || !t) return { localDate: '', localTime: '' };
-                const dt = new Date(`${d}T${t}Z`);
+                const dt = new Date(`\${d}T\${t}Z`);
                 if (isNaN(dt)) return { localDate: '', localTime: '' };
-                return { localDate: `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}`, localTime: `${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}` };
+                // *** FIX ***: Escape all template literals
+                return { localDate: `\${dt.getFullYear()}-\${pad(dt.getMonth() + 1)}-\${pad(dt.getDate())}`, localTime: `\${pad(dt.getHours())}:\${pad(dt.getMinutes())}:\${pad(dt.getSeconds())}` };
             };
             
             function bytesToReadable(bytes) {
                 if (bytes <= 0) return '0 Bytes';
                 const i = Math.floor(Math.log(bytes) / Math.log(1024));
-                return `${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} ${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}`;
+                // *** FIX ***: Escape template literal
+                return `\${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} \${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}`;
             }
 
             function renderStats(stats) {
                 const statsContainer = document.getElementById('stats');
+                // *** FIX ***: Escape all template literals
                 statsContainer.innerHTML = \`
-                    <div class="stat-card"><h3 class="stat-title">Total Users</h3><p class="stat-value">${stats.totalUsers}</p></div>
-                    <div class="stat-card"><h3 class="stat-title">Active Users</h3><p class="stat-value">${stats.activeUsers}</p></div>
-                    <div class="stat-card"><h3 class="stat-title">Expired Users</h3><p class="stat-value">${stats.expiredUsers}</p></div>
-                    <div class="stat-card"><h3 class="stat-title">Total Traffic</h3><p class="stat-value">${bytesToReadable(stats.totalTraffic)}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Total Users</h3><p class="stat-value">\${stats.totalUsers}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Active Users</h3><p class="stat-value">\${stats.activeUsers}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Expired Users</h3><p class="stat-value">\${stats.expiredUsers}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Total Traffic</h3><p class="stat-value">\${bytesToReadable(stats.totalTraffic)}</p></div>
                 \`;
             }
             
             function renderUsers(users) {
                 const userList = document.getElementById('userList');
                 userList.innerHTML = users.length === 0 ? '<tr><td colspan="8" style="text-align:center;">No users found.</td></tr>' : users.map(user => {
-                    const expiryUTC = new Date(`${user.expiration_date}T${user.expiration_time}Z`);
+                    const expiryUTC = new Date(`\${user.expiration_date}T\${user.expiration_time}Z`);
                     const isUserExpired = expiryUTC < new Date();
-                    const trafficUsage = user.data_limit > 0 ? `${bytesToReadable(user.data_usage)} / ${bytesToReadable(user.data_limit)}` : `${bytesToReadable(user.data_usage)} / &infin;`;
+                    const trafficUsage = user.data_limit > 0 ? `\${bytesToReadable(user.data_usage)} / \${bytesToReadable(user.data_limit)}` : `\${bytesToReadable(user.data_usage)} / &infin;`;
                     const trafficPercent = user.data_limit > 0 ? Math.min(100, (user.data_usage / user.data_limit * 100)) : 0;
                     
+                    // *** FIX ***: Escape all template literals
                     return \`
-                        <tr data-uuid="${user.uuid}">
-                            <td title="${user.uuid}">${user.uuid.substring(0, 8)}...</td>
-                            <td>${new Date(user.created_at).toLocaleString()}</td>
-                            <td>${expiryUTC.toLocaleString()}</td>
-                            <td><span class="status-badge ${isUserExpired ? 'status-expired' : 'status-active'}">${isUserExpired ? 'Expired' : 'Active'}</span></td>
+                        <tr data-uuid="\${user.uuid}">
+                            <td title="\${user.uuid}">\${user.uuid.substring(0, 8)}...</td>
+                            <td>\${new Date(user.created_at).toLocaleString()}</td>
+                            <td>\${expiryUTC.toLocaleString()}</td>
+                            <td><span class="status-badge \${isUserExpired ? 'status-expired' : 'status-active'}">\${isUserExpired ? 'Expired' : 'Active'}</span></td>
                             <td>
-                                ${trafficUsage}
-                                <div class="traffic-bar"><div class="traffic-bar-inner" style="width: ${trafficPercent}%;"></div></div>
+                                \${trafficUsage}
+                                <div class="traffic-bar"><div class="traffic-bar-inner" style="width: \${trafficPercent}%;"></div></div>
                             </td>
-                            <td>${user.ip_limit > 0 ? user.ip_limit : 'Unlimited'}</td>
-                            <td>${user.notes || '-'}</td>
+                            <td>\${user.ip_limit > 0 ? user.ip_limit : 'Unlimited'}</td>
+                            <td>\${user.notes || '-'}</td>
                             <td class="actions-cell">
                                 <button class="btn btn-secondary btn-edit">Edit</button>
                                 <button class="btn btn-danger btn-delete">Delete</button>
@@ -460,8 +468,9 @@ const adminPanelHTML = `<!DOCTYPE html>
                     document.getElementById('resetTraffic').checked = false;
                     editModal.classList.add('show');
                 } else if (button.classList.contains('btn-delete')) {
-                    if (confirm(`Are you sure you want to delete user ${uuid.substring(0,8)}...?`)) {
-                        api.delete(`/users/${uuid}`).then(() => {
+                    // *** FIX ***: Escape template literal
+                    if (confirm(`Are you sure you want to delete user \${uuid.substring(0,8)}...?`)) {
+                        api.delete(`/users/\${uuid}`).then(() => {
                             showToast('User deleted successfully!');
                             refreshData();
                         }).catch(err => showToast(err.message, true));
@@ -482,7 +491,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                     reset_traffic: document.getElementById('resetTraffic').checked,
                 };
                 try {
-                    await api.put(`/users/${uuid}`, updatedData);
+                    await api.put(`/users/\${uuid}`, updatedData);
                     showToast('User updated successfully!');
                     editModal.classList.remove('show');
                     refreshData();
@@ -504,8 +513,9 @@ const adminPanelHTML = `<!DOCTYPE html>
             const setDefaultExpiry = () => {
                 const now = new Date();
                 now.setMonth(now.getMonth() + 1);
-                document.getElementById('expiryDate').value = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-                document.getElementById('expiryTime').value = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+                // *** FIX ***: Escape all template literals
+                document.getElementById('expiryDate').value = `\${now.getFullYear()}-\${pad(now.getMonth() + 1)}-\${pad(now.getDate())}`;
+                document.getElementById('expiryTime').value = `\${pad(now.getHours())}:\${pad(now.getMinutes())}:\${pad(now.getSeconds())}`;
             };
             
             // Initial load
@@ -644,7 +654,7 @@ async function handleAdminRequest(request, env) {
                 await env.USER_KV.put(`admin_session:${sessionToken}`, JSON.stringify({ csrfToken }), { expirationTtl: 86400 });
                 const headers = new Headers({
                     'Location': cfg.adminPath,
-                    'Set-Cookie': `auth_token=${sessionToken}; HttpOnly; Secure; Path=${cfg.adminPath}; Max-Age=86400; SameSite=Strict`
+                    'Set-Cookie': `auth_token=${sessionToken}; HttpOnly; Secure; Path=${adminPath}; Max-Age=86400; SameSite=Strict`
                 });
                 return new Response(null, { status: 302, headers });
             } else {
@@ -1396,7 +1406,8 @@ body{font-family:"Styrene B LC",-apple-system,BlinkMacSystemFont,"Segoe UI",sans
 }
 `;
 
-const configPageJS = `
+// *** FIX ***: This ENTIRE string variable needs its template literals escaped
+const configPageJS = \`
 function copyToClipboard(button, text) {
   const original = button.textContent;
   navigator.clipboard.writeText(text).then(() => {
@@ -1495,7 +1506,7 @@ function populateScamalytics(data) {
   const riskEl = document.getElementById('client-proxy');
   
   if (data && data.error) {
-      if (riskEl) riskEl.innerHTML = \`<span classclass="badge badge-neutral">Not Configured</span>\`;
+      if (riskEl) riskEl.innerHTML = \`<span class="badge badge-neutral">Not Configured</span>\`;
       return;
   }
   
@@ -1603,7 +1614,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setInterval(updateExpiration, 60 * 1000);
   loadNetworkInfo();
 });
-`;
+\`;
 
 
 // --- Main Fetch Handler (Merged) ---
