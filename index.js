@@ -75,6 +75,7 @@ const Config = {
             proxyAddress: candidate,
             scamalytics: {
                 // S2 Scamalytics config, BUT securely read from env
+                username: 'revilseptember',
                 apiKey: env.SCAMALYTICS_API_KEY || null,
                 baseUrl: 'https://api12.scamalytics.com/v3/',
             },
