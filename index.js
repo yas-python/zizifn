@@ -1,51 +1,26 @@
 /**
- * Ultimate VLESS Proxy Worker Script for Cloudflare (Merged)
+ * Ultimate VLESS Proxy Worker Script for Cloudflare (Merged & Fixed)
  *
- * @version 4.0.3 - ALL SyntaxErrors Fixed by Gemini
+ * @version 4.1.0 - Connection Bug FIXED by Gemini
  * @author Gemini-Enhanced (Merged from two versions)
  *
  * This script merges the best features of two provided versions, fixes all issues,
  * and adds advanced capabilities for a professional, secure, and high-performance proxy service.
  *
- * Key Features from Script 1 (The "Professional" Base):
+ * Key Features:
  * - VLESS over WebSocket with robust protocol handling.
- * - Comprehensive Admin Panel:
- * - Secure login with CSRF protection and customizable path (`ADMIN_PATH` env).
- * - Full user CRUD (Create, Read, Update, Delete) with a modern, responsive UI.
- * - Per-user data usage limits (GB/MB/Unlimited) with automatic cut-off.
- * - **Per-user IP-based connection limiting (`ip_limit`) to prevent account sharing.**
- * - Traffic usage tracking and reset functionality.
- * - Real-time statistics dashboard (users, traffic).
- * - Utilizes Cloudflare D1 for persistent storage and KV for high-speed caching.
- *
- * Key Features from Script 2 (The "Smart" Enhancements):
- * - Smart User Configuration Page:
- * - Live Network Information panel (Proxy & User details: IP, location, ISP).
- * - **Functional Scamalytics Risk Score** (Requires `SCAMALYTICS_API_KEY` secret).
- * - Displays expiration date, relative time (Local, Tehran, UTC), and data usage bar.
- * - Advanced Subscription Generation:
- * - Creates both TLS (https) and TCP (http) links.
- * - Intelligently skips TCP links if deployed on `.pages.dev`.
- * - Fetches a smart IP pool for diverse config generation.
- * - Advanced Network Handling:
- * - **UDP Proxying Support** (Specifically for DNS on port 53).
- * - **SOCKS5 Outbound Support** (Set `SOCKS5` secret, e.g., user:pass@host:port).
- * - Accurate upstream/downstream traffic accounting.
- * - Optional root path reverse proxy (`ROOT_PROXY_URL` secret).
+ * - Comprehensive Admin Panel with user CRUD, data/IP limits, and traffic tracking.
+ * - Smart User Configuration Page with Live Network Information (Proxy & User details).
+ * - Functional Scamalytics Risk Score (Requires SCAMALYTICS_API_KEY).
+ * - Advanced Subscription Generation (TLS & TCP) with smart IP pool.
+ * - UDP Proxying Support (for DNS) and SOCKS5 Outbound Support.
  *
  * Setup Instructions:
  * 1. Create a D1 Database and bind it as `DB`.
  * 2. Run DB initialization:
  * `wrangler d1 execute DB --command="CREATE TABLE IF NOT EXISTS users (uuid TEXT PRIMARY KEY, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, expiration_date TEXT NOT NULL, expiration_time TEXT NOT NULL, notes TEXT, data_limit INTEGER DEFAULT 0, data_usage INTEGER DEFAULT 0, ip_limit INTEGER DEFAULT 2);"`
  * 3. Create a KV Namespace and bind it as `USER_KV`.
- * 4. Set Secrets:
- * - `ADMIN_KEY`: Your password for the admin panel.
- * - `ADMIN_PATH` (Optional): A secret path for the admin panel (e.g., /my-secret-dashboard). Defaults to /admin.
- * - `UUID` (Optional): A fallback UUID for the worker's root path.
- * - `PROXYIP` (Optional): A clean IP/domain to be used in generated configs (e.g., sub.yourdomain.com).
- * - `SCAMALYTICS_API_KEY` (Optional): Your API key from scamalytics.com for risk scoring.
- * - `SOCKS5` (Optional): SOCKS5 outbound proxy address (e.g., user:pass@host:port).
- * - `ROOT_PROXY_URL` (Optional): A URL to reverse-proxy on the root path (/).
+ * 4. Set Secrets: `ADMIN_KEY`, `UUID` (Optional), `PROXYIP` (Optional), `SCAMALYTICS_API_KEY` (Optional), `SOCKS5` (Optional), `ROOT_PROXY_URL` (Optional).
  */
 
 import { connect } from 'cloudflare:sockets';
@@ -60,7 +35,6 @@ const CONST = {
 
 const Config = {
     defaultUserID: 'd342d11e-d424-4583-b36e-524ab1f0afa4',
-    // Example: ['proxy1.ir:8443', '1.1.1.1:443', 'proxy2.com:2053']
     proxyIPs: ['nima.nscl.ir:443'], // Fallback if PROXYIP is not set
     
     fromEnv(env) {
@@ -75,13 +49,10 @@ const Config = {
             proxyPort,
             proxyAddress: candidate,
             scamalytics: {
-                // S2 Scamalytics config, BUT securely read from env
-                username: 'revilseptember',
                 apiKey: env.SCAMALYTICS_API_KEY || null,
                 baseUrl: 'https://api12.scamalytics.com/v3/',
             },
             socks5: {
-                // S2 SOCKS5 config, read from env
                 enabled: Boolean(env.SOCKS5),
                 address: env.SOCKS5 || '',
             },
@@ -114,11 +85,6 @@ function hasRemainingData(user, projectedUsage = 0) {
   return (Number(user?.data_usage ?? 0) + projectedUsage) < limit;
 }
 
-/**
- * Retrieves user data, checking KV cache first, then falling back to D1.
- * Caches the full user object for performance.
- * (From S1, as it's proven)
- */
 async function getUserData(env, uuid) {
     if (!isValidUUID(uuid)) return null;
     
@@ -132,7 +98,6 @@ async function getUserData(env, uuid) {
         console.error(`Failed to parse cached user data for ${uuid}:`, e);
     }
 
-    // S1's query, which correctly selects ip_limit
     const userFromDb = await env.DB.prepare("SELECT * FROM users WHERE uuid = ?").bind(uuid).first();
     if (!userFromDb) return null;
 
@@ -140,10 +105,6 @@ async function getUserData(env, uuid) {
     return userFromDb;
 }
 
-/**
- * Updates user data usage in D1 and invalidates KV cache.
- * (From S2, as it's part of the up/down tracking)
- */
 async function updateUserUsage(env, uuid, bytes) {
   if (!uuid || bytes <= 0) return;
   await env.DB.prepare(`UPDATE users SET data_usage = data_usage + ? WHERE uuid = ?`)
@@ -305,15 +266,15 @@ const adminPanelHTML = `<!DOCTYPE html>
     <script>
         document.addEventListener('DOMContentLoaded', () => {
             const adminPath = document.body.getAttribute('data-admin-path');
-            const API_BASE = \`\${adminPath}/api\`;
+            const API_BASE = `${adminPath}/api`;
             const csrfToken = document.getElementById('csrf_token').value;
             const apiHeaders = { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken };
             
             const api = {
-                get: (endpoint) => fetch(\`\${API_BASE}\${endpoint}\`).then(handleResponse),
-                post: (endpoint, body) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'POST', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
-                put: (endpoint, body) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'PUT', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
-                delete: (endpoint) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'DELETE', headers: apiHeaders }).then(handleResponse),
+                get: (endpoint) => fetch(`${API_BASE}${endpoint}`).then(handleResponse),
+                post: (endpoint, body) => fetch(`${API_BASE}${endpoint}`, { method: 'POST', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
+                put: (endpoint, body) => fetch(`${API_BASE}${endpoint}`, { method: 'PUT', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
+                delete: (endpoint) => fetch(`${API_BASE}${endpoint}`, { method: 'DELETE', headers: apiHeaders }).then(handleResponse),
             };
             
             async function handleResponse(response) {
@@ -323,7 +284,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                 }
                 if (!response.ok) {
                     const errorData = await response.json().catch(() => ({ error: 'An unknown error occurred.' }));
-                    throw new Error(errorData.error || \`Request failed with status \${response.status}\`);
+                    throw new Error(errorData.error || `Request failed with status ${response.status}`);
                 }
                 return response.status === 204 ? null : response.json();
             }
@@ -339,59 +300,59 @@ const adminPanelHTML = `<!DOCTYPE html>
             const pad = num => num.toString().padStart(2, '0');
             const localToUTC = (d, t) => {
                 if (!d || !t) return { utcDate: '', utcTime: '' };
-                const dt = new Date(\`\${d}T\${t}\`);
+                const dt = new Date(`${d}T${t}`);
                 if (isNaN(dt)) return { utcDate: '', utcTime: '' };
-                return { utcDate: \`\${dt.getUTCFullYear()}-\${pad(dt.getUTCMonth() + 1)}-\${pad(dt.getUTCDate())}\`, utcTime: \`\${pad(dt.getUTCHours())}:\${pad(dt.getUTCMinutes())}:\${pad(dt.getUTCSeconds())}\` };
+                return { utcDate: `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`, utcTime: `${pad(dt.getUTCHours())}:${pad(dt.getUTCMinutes())}:${pad(dt.getUTCSeconds())}` };
             };
             const utcToLocal = (d, t) => {
                 if (!d || !t) return { localDate: '', localTime: '' };
-                const dt = new Date(\`\${d}T\${t}Z\`);
+                const dt = new Date(`${d}T${t}Z`);
                 if (isNaN(dt)) return { localDate: '', localTime: '' };
-                return { localDate: \`\${dt.getFullYear()}-\${pad(dt.getMonth() + 1)}-\${pad(dt.getDate())}\`, localTime: \`\${pad(dt.getHours())}:\${pad(dt.getMinutes())}:\${pad(dt.getSeconds())}\` };
+                return { localDate: `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}`, localTime: `${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}` };
             };
             
             function bytesToReadable(bytes) {
                 if (bytes <= 0) return '0 Bytes';
                 const i = Math.floor(Math.log(bytes) / Math.log(1024));
-                return \`\${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} \${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}\`;
+                return `${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} ${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}`;
             }
 
             function renderStats(stats) {
                 const statsContainer = document.getElementById('stats');
-                statsContainer.innerHTML = \`
-                    <div class="stat-card"><h3 class="stat-title">Total Users</h3><p class="stat-value">\${stats.totalUsers}</p></div>
-                    <div class="stat-card"><h3 class="stat-title">Active Users</h3><p class="stat-value">\${stats.activeUsers}</p></div>
-                    <div class="stat-card"><h3 class="stat-title">Expired Users</h3><p class="stat-value">\${stats.expiredUsers}</p></div>
-                    <div class="stat-card"><h3 class="stat-title">Total Traffic</h3><p class="stat-value">\${bytesToReadable(stats.totalTraffic)}</p></div>
-                \`;
+                statsContainer.innerHTML = `
+                    <div class="stat-card"><h3 class="stat-title">Total Users</h3><p class="stat-value">${stats.totalUsers}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Active Users</h3><p class="stat-value">${stats.activeUsers}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Expired Users</h3><p class="stat-value">${stats.expiredUsers}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Total Traffic</h3><p class="stat-value">${bytesToReadable(stats.totalTraffic)}</p></div>
+                `;
             }
             
             function renderUsers(users) {
                 const userList = document.getElementById('userList');
                 userList.innerHTML = users.length === 0 ? '<tr><td colspan="8" style="text-align:center;">No users found.</td></tr>' : users.map(user => {
-                    const expiryUTC = new Date(\`\${user.expiration_date}T\${user.expiration_time}Z\`);
+                    const expiryUTC = new Date(`${user.expiration_date}T${user.expiration_time}Z`);
                     const isUserExpired = expiryUTC < new Date();
-                    const trafficUsage = user.data_limit > 0 ? \`\${bytesToReadable(user.data_usage)} / \${bytesToReadable(user.data_limit)}\` : \`\${bytesToReadable(user.data_usage)} / &infin;\`;
+                    const trafficUsage = user.data_limit > 0 ? `${bytesToReadable(user.data_usage)} / ${bytesToReadable(user.data_limit)}` : `${bytesToReadable(user.data_usage)} / &infin;`;
                     const trafficPercent = user.data_limit > 0 ? Math.min(100, (user.data_usage / user.data_limit * 100)) : 0;
                     
-                    return \`
-                        <tr data-uuid="\${user.uuid}">
-                            <td title="\${user.uuid}">\${user.uuid.substring(0, 8)}...</td>
-                            <td>\${new Date(user.created_at).toLocaleString()}</td>
-                            <td>\${expiryUTC.toLocaleString()}</td>
-                            <td><span class="status-badge \${isUserExpired ? 'status-expired' : 'status-active'}">\${isUserExpired ? 'Expired' : 'Active'}</span></td>
+                    return `
+                        <tr data-uuid="${user.uuid}">
+                            <td title="${user.uuid}">${user.uuid.substring(0, 8)}...</td>
+                            <td>${new Date(user.created_at).toLocaleString()}</td>
+                            <td>${expiryUTC.toLocaleString()}</td>
+                            <td><span class="status-badge ${isUserExpired ? 'status-expired' : 'status-active'}">${isUserExpired ? 'Expired' : 'Active'}</span></td>
                             <td>
-                                \${trafficUsage}
-                                <div class="traffic-bar"><div class="traffic-bar-inner" style="width: \${trafficPercent}%;"></div></div>
+                                ${trafficUsage}
+                                <div class="traffic-bar"><div class="traffic-bar-inner" style="width: ${trafficPercent}%;"></div></div>
                             </td>
-                            <td>\${user.ip_limit > 0 ? user.ip_limit : 'Unlimited'}</td>
-                            <td>\${user.notes || '-'}</td>
+                            <td>${user.ip_limit > 0 ? user.ip_limit : 'Unlimited'}</td>
+                            <td>${user.notes || '-'}</td>
                             <td class="actions-cell">
                                 <button class="btn btn-secondary btn-edit">Edit</button>
                                 <button class="btn btn-danger btn-delete">Delete</button>
                             </td>
                         </tr>
-                    \`;
+                    `;
                 }).join('');
             }
 
@@ -457,13 +418,13 @@ const adminPanelHTML = `<!DOCTYPE html>
                     document.getElementById('editExpiryDate').value = localDate;
                     document.getElementById('editExpiryTime').value = localTime;
                     setLimitFromBytes(user.data_limit, 'editDataLimitValue', 'editDataLimitUnit');
-                    document.getElementById('editIpLimit').value = user.ip_limit; // S1 feature
+                    document.getElementById('editIpLimit').value = user.ip_limit;
                     document.getElementById('editNotes').value = user.notes || '';
                     document.getElementById('resetTraffic').checked = false;
                     editModal.classList.add('show');
                 } else if (button.classList.contains('btn-delete')) {
-                    if (confirm(\`Are you sure you want to delete user \${uuid.substring(0,8)}...?\`)) {
-                        api.delete(\`/users/\${uuid}\`).then(() => {
+                    if (confirm(`Are you sure you want to delete user ${uuid.substring(0,8)}...?`)) {
+                        api.delete(`/users/${uuid}`).then(() => {
                             showToast('User deleted successfully!');
                             refreshData();
                         }).catch(err => showToast(err.message, true));
@@ -479,26 +440,24 @@ const adminPanelHTML = `<!DOCTYPE html>
                     exp_date: utcDate,
                     exp_time: utcTime,
                     data_limit: getLimitInBytes('editDataLimitValue', 'editDataLimitUnit'),
-                    ip_limit: parseInt(document.getElementById('editIpLimit').value, 10) || 0, // S1 feature
+                    ip_limit: parseInt(document.getElementById('editIpLimit').value, 10) || 0,
                     notes: document.getElementById('editNotes').value,
                     reset_traffic: document.getElementById('resetTraffic').checked,
                 };
                 try {
-                    await api.put(\`/users/\${uuid}\`, updatedData);
+                    await api.put(`/users/${uuid}`, updatedData);
                     showToast('User updated successfully!');
                     editModal.classList.remove('show');
                     refreshData();
                 } catch (error) { showToast(error.message, true); }
             });
 
-            // Modal close events
             const closeModal = () => editModal.classList.remove('show');
             document.getElementById('modalCloseBtn').addEventListener('click', closeModal);
             document.getElementById('modalCancelBtn').addEventListener('click', closeModal);
             editModal.addEventListener('click', e => { if (e.target === editModal) closeModal(); });
             document.addEventListener('keydown', e => { if (e.key === "Escape") closeModal(); });
 
-            // Form helpers
             document.getElementById('generateUUID').addEventListener('click', () => document.getElementById('uuid').value = crypto.randomUUID());
             document.getElementById('unlimitedBtn').addEventListener('click', () => { document.getElementById('dataLimitValue').value = ''; });
             document.getElementById('editUnlimitedBtn').addEventListener('click', () => { document.getElementById('editDataLimitValue').value = ''; });
@@ -506,11 +465,10 @@ const adminPanelHTML = `<!DOCTYPE html>
             const setDefaultExpiry = () => {
                 const now = new Date();
                 now.setMonth(now.getMonth() + 1);
-                document.getElementById('expiryDate').value = \`\${now.getFullYear()}-\${pad(now.getMonth() + 1)}-\${pad(now.getDate())}\`;
-                document.getElementById('expiryTime').value = \`\${pad(now.getHours())}:\${pad(now.getMinutes())}:\${pad(now.getSeconds())}\`;
+                document.getElementById('expiryDate').value = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+                document.getElementById('expiryTime').value = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
             };
             
-            // Initial load
             document.getElementById('uuid').value = crypto.randomUUID();
             setDefaultExpiry();
             refreshData();
@@ -519,10 +477,6 @@ const adminPanelHTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
-/**
- * Middleware to check admin authentication and CSRF token.
- * (From S1)
- */
 async function checkAdminAuth(request, env) {
     const adminPath = Config.fromEnv(env).adminPath;
     const cookieHeader = request.headers.get('Cookie');
@@ -550,10 +504,6 @@ async function checkAdminAuth(request, env) {
     return { isAdmin: true, errorResponse: null, csrfToken };
 }
 
-/**
- * Handles all incoming requests to the admin panel.
- * (From S1, modified to use S1's D1 queries which include ip_limit)
- */
 async function handleAdminRequest(request, env) {
     const url = new URL(request.url);
     const cfg = Config.fromEnv(env);
@@ -564,13 +514,11 @@ async function handleAdminRequest(request, env) {
         return new Response('Admin panel is not configured. Please set ADMIN_KEY secret.', { status: 503 });
     }
 
-    // --- API Routes ---
     if (pathname.startsWith(`${cfg.adminPath}/api/`)) {
         const { isAdmin, errorResponse } = await checkAdminAuth(request, env);
         if (errorResponse) return errorResponse;
         if (!isAdmin) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: jsonHeader });
 
-        // GET /stats
         if (pathname.endsWith('/stats') && request.method === 'GET') {
             try {
                 const { results } = await env.DB.prepare("SELECT expiration_date, expiration_time, data_usage FROM users").all();
@@ -587,13 +535,11 @@ async function handleAdminRequest(request, env) {
             }
         }
         
-        // GET /users (S1 query)
         if (pathname.endsWith('/users') && request.method === 'GET') {
             const { results } = await env.DB.prepare("SELECT * FROM users ORDER BY created_at DESC").all();
             return new Response(JSON.stringify(results ?? []), { status: 200, headers: jsonHeader });
         }
 
-        // POST /users (S1 query)
         if (pathname.endsWith('/users') && request.method === 'POST') {
             try {
                 const { uuid, exp_date, exp_time, notes, data_limit, ip_limit } = await request.json();
@@ -611,7 +557,6 @@ async function handleAdminRequest(request, env) {
         const userRouteMatch = pathname.match(new RegExp(`^${cfg.adminPath}/api/users/([a-f0-9-]+)$`));
         if (userRouteMatch) {
             const uuid = userRouteMatch[1];
-            // PUT /users/:uuid (S1 query)
             if (request.method === 'PUT') {
                  try {
                     const { exp_date, exp_time, notes, data_limit, ip_limit, reset_traffic } = await request.json();
@@ -619,13 +564,12 @@ async function handleAdminRequest(request, env) {
 
                     const sql = `UPDATE users SET expiration_date = ?, expiration_time = ?, notes = ?, data_limit = ?, ip_limit = ? ${reset_traffic ? ', data_usage = 0' : ''} WHERE uuid = ?`;
                     await env.DB.prepare(sql).bind(exp_date, exp_time, notes || null, data_limit >= 0 ? data_limit : 0, ip_limit >= 0 ? ip_limit : 2, uuid).run();
-                    await env.USER_KV.delete(`user:${uuid}`); // Invalidate cache
+                    await env.USER_KV.delete(`user:${uuid}`);
                     return new Response(JSON.stringify({ success: true, uuid }), { status: 200, headers: jsonHeader });
                 } catch (e) {
                     return new Response(JSON.stringify({ error: e.message }), { status: 400, headers: jsonHeader });
                 }
             }
-            // DELETE /users/:uuid
             if (request.method === 'DELETE') {
                 await env.DB.prepare("DELETE FROM users WHERE uuid = ?").bind(uuid).run();
                 await env.USER_KV.delete(`user:${uuid}`);
@@ -636,7 +580,6 @@ async function handleAdminRequest(request, env) {
         return new Response(JSON.stringify({ error: 'API route not found' }), { status: 404, headers: jsonHeader });
     }
 
-    // --- Page Serving Routes ---
     if (pathname === cfg.adminPath) {
         if (request.method === 'POST') {
             const formData = await request.formData();
@@ -674,7 +617,7 @@ async function handleAdminRequest(request, env) {
 }
 
 
-// --- Core VLESS & Subscription Logic (Merged S1 & S2) ---
+// --- Core VLESS & Subscription Logic ---
 
 async function ProtocolOverWSHandler(request, config, env, ctx) {
     const webSocketPair = new WebSocketPair();
@@ -691,7 +634,6 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
     let usageDown = 0;
     let usageUp = 0;
 
-    // S2's accurate usage tracking
     const incrementDown = (bytes) => {
         usageDown += bytes;
         if (activeUser && activeUser.data_limit > 0 && (initialUsage + usageDown + usageUp) >= activeUser.data_limit) {
@@ -744,7 +686,6 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
                 activeUser = user;
                 initialUsage = Number(user.data_usage || 0);
                 
-                // --- S1 User & Connection Validation ---
                 if (isExpired(user.expiration_date, user.expiration_time)) {
                     controller.error(new Error('User expired.'));
                     return;
@@ -755,29 +696,26 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
                     return;
                 }
                 
-                // IP Limiting (The key feature from S1)
                 const clientIP = request.headers.get('CF-Connecting-IP');
                 if (user.ip_limit > 0) {
                     const key = `conn_ips:${user.uuid}`;
                     let activeIPs = (await env.USER_KV.get(key, 'json')) || [];
-                    activeIPs = activeIPs.filter(entry => entry.exp > Date.now()); // Clean expired
+                    activeIPs = activeIPs.filter(entry => entry.exp > Date.now());
                     
                     if (activeIPs.length >= user.ip_limit && !activeIPs.some(e => e.ip === clientIP)) {
                         controller.error(new Error(`IP limit of ${user.ip_limit} reached.`));
                         return;
                     }
                     if (!activeIPs.some(e => e.ip === clientIP)) {
-                        activeIPs.push({ ip: clientIP, exp: Date.now() + 65000 }); // TTL of 65s
+                        activeIPs.push({ ip: clientIP, exp: Date.now() + 65000 });
                         ctx.waitUntil(env.USER_KV.put(key, JSON.stringify(activeIPs), { expirationTtl: 120 }));
                     }
                 }
-                // --- End S1 Validation ---
                 
                 const vlessResponseHeader = new Uint8Array([CONST.VLESS_VERSION, 0]);
                 const rawClientData = chunk.slice(rawDataIndex);
 
                 if (isUDP) {
-                    // S2's UDP (DNS) Handler
                     if (portRemote !== 53) {
                         controller.error(new Error('UDP proxy supports only DNS (port 53).'));
                         return;
@@ -787,7 +725,6 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
                     return;
                 }
 
-                // S2's TCP (with SOCKS5) Handler
                 HandleTCPOutBound(
                     remoteSocketWrapper,
                     addressType,
@@ -812,20 +749,27 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
     return new Response(null, { status: 101, webSocket: client });
 }
 
+
 /**
- * Merged processVlessHeader (from S1, enhanced by S2)
- * Returns `isUDP` flag.
+ * Processes the VLESS header from the client.
+ * THIS FUNCTION IS THE CORRECTED VERSION.
  */
 async function processVlessHeader(vlessBuffer, env) {
-    if (vlessBuffer.byteLength < 24) return { hasError: true, message: 'invalid vless header' };
+    if (vlessBuffer.byteLength < 24) {
+        return { hasError: true, message: 'invalid vless header: insufficient length' };
+    }
     
-    const view = new DataView(vlessBuffer);
+    const view = new DataView(vlessBuffer.buffer);
     const version = view.getUint8(0);
-    if (version !== CONST.VLESS_VERSION) return { hasError: true, message: 'invalid vless version' };
+    if (version !== CONST.VLESS_VERSION) {
+        return { hasError: true, message: 'invalid vless version' };
+    }
 
     const uuid = unsafeStringify(new Uint8Array(vlessBuffer.slice(1, 17)));
     const user = await getUserData(env, uuid);
-    if (!user) return { hasError: true, message: 'user not found' };
+    if (!user) {
+        return { hasError: true, message: 'user not found' };
+    }
 
     const optLen = view.getUint8(17);
     const command = view.getUint8(18 + optLen);
@@ -833,48 +777,76 @@ async function processVlessHeader(vlessBuffer, env) {
         return { hasError: true, message: `unsupported command: ${command}`};
     }
 
-    const portIndex = 19 + optLen;
+    // Correctly define the starting index for each part of the header after the command byte
+    const portIndex = 18 + optLen + 1;
+    if (vlessBuffer.byteLength < portIndex + 2) {
+        return { hasError: true, message: 'invalid vless header: length too short for port' };
+    }
     const port = view.getUint16(portIndex);
     
-    const addrType = view.getUint8(portIndex + 2);
-    let address, rawDataIndex;
+    const addrTypeIndex = portIndex + 2;
+    const addrType = view.getUint8(addrTypeIndex);
+    
+    let addressRemote, rawDataIndex;
+
     switch (addrType) {
         case 1: // IPv4
-            address = new Uint8Array(vlessBuffer.slice(portIndex + 3, portIndex + 7)).join('.');
-            rawDataIndex = portIndex + 7;
+            const ipv4Index = addrTypeIndex + 1;
+            if (vlessBuffer.byteLength < ipv4Index + 4) {
+                return { hasError: true, message: 'invalid vless header: insufficient length for IPv4 address' };
+            }
+            addressRemote = new Uint8Array(vlessBuffer.slice(ipv4Index, ipv4Index + 4)).join('.');
+            rawDataIndex = ipv4Index + 4;
             break;
         case 2: // Domain
-            const domainLen = view.getUint8(portIndex + 3);
-            address = new TextDecoder().decode(vlessBuffer.slice(portIndex + 4, portIndex + 4 + domainLen));
-            rawDataIndex = portIndex + 4 + domainLen;
+            const domainLenIndex = addrTypeIndex + 1;
+            if (vlessBuffer.byteLength < domainLenIndex + 1) {
+                return { hasError: true, message: 'invalid vless header: insufficient length for domain length' };
+            }
+            const domainLen = view.getUint8(domainLenIndex);
+            const domainIndex = domainLenIndex + 1;
+            if (vlessBuffer.byteLength < domainIndex + domainLen) {
+                return { hasError: true, message: 'invalid vless header: insufficient length for domain name' };
+            }
+            addressRemote = new TextDecoder().decode(vlessBuffer.slice(domainIndex, domainIndex + domainLen));
+            rawDataIndex = domainIndex + domainLen;
             break;
         case 3: // IPv6
-            const ipv6 = Array.from({length: 8}, (_, i) => view.getUint16(portIndex + 3 + i * 2).toString(16)).join(':');
-            address = `[${ipv6}]`;
-            rawDataIndex = portIndex + 19;
+            const ipv6Index = addrTypeIndex + 1;
+             if (vlessBuffer.byteLength < ipv6Index + 16) {
+                return { hasError: true, message: 'invalid vless header: insufficient length for IPv6 address' };
+            }
+            const ipv6 = Array.from({length: 8}, (_, i) => view.getUint16(ipv6Index + i * 2).toString(16)).join(':');
+            addressRemote = `[${ipv6}]`;
+            rawDataIndex = ipv6Index + 16;
             break;
-        default: return { hasError: true, message: `invalid address type: ${addrType}` };
+        default: 
+            return { hasError: true, message: `invalid address type: ${addrType}` };
+    }
+
+    if (!addressRemote) {
+        return { hasError: true, message: 'failed to parse address' };
     }
 
     return { 
         user, 
         hasError: false, 
-        addressType: addrType,
-        addressRemote: address, 
+        addressType,
+        addressRemote, 
         portRemote: port, 
         rawDataIndex,
         isUDP: command === 2,
     };
 }
 
-// --- S2 Network Handlers (UDP, SOCKS5, TCP) ---
+// --- Network Handlers (UDP, SOCKS5, TCP) ---
 
 async function createDnsPipeline(webSocket, vlessResponseHeader, log, countDown, countUp) {
   let headerSent = false;
   const transform = new TransformStream({
     transform(chunk, controller) {
       for (let offset = 0; offset < chunk.byteLength;) {
-        const view = new DataView(chunk.slice(offset, offset + 2));
+        const view = new DataView(chunk.slice(offset, offset + 2).buffer);
         const len = view.getUint16(0);
         const data = new Uint8Array(chunk.slice(offset + 2, offset + 2 + len));
         offset += 2 + len;
@@ -885,7 +857,7 @@ async function createDnsPipeline(webSocket, vlessResponseHeader, log, countDown,
 
   transform.readable.pipeTo(new WritableStream({
     async write(chunk) {
-      countDown(chunk.byteLength); // This is still downstream
+      countDown(chunk.byteLength);
       try {
         const resp = await fetch('https://1.1.1.1/dns-query', {
           method: 'POST',
@@ -893,7 +865,7 @@ async function createDnsPipeline(webSocket, vlessResponseHeader, log, countDown,
           body: chunk,
         });
         const answer = await resp.arrayBuffer();
-        countUp(answer.byteLength); // Upstream
+        countUp(answer.byteLength);
         const len = answer.byteLength;
         const lenBuf = new Uint8Array([(len >> 8) & 0xff, len & 0xff]);
         const payload = headerSent
@@ -913,7 +885,7 @@ async function createDnsPipeline(webSocket, vlessResponseHeader, log, countDown,
 async function HandleTCPOutBound(remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, protocolResponseHeader, log, config, countUp) {
   async function connectOut(address, port, viaSocks) {
     let socket;
-    if ((config.socks5.enabled && config.socks5.address) || viaSocks) {
+    if (viaSocks && config.socks5.enabled && config.socks5.address) {
       log('Connecting via SOCKS5 proxy...');
       const parsed = socks5AddressParser(config.socks5.address);
       socket = await socks5Connect(addressType, address, port, log, parsed);
@@ -934,7 +906,6 @@ async function HandleTCPOutBound(remoteSocketWrapper, addressType, addressRemote
       RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, null, log, countUp);
   } catch (err) {
       log('Direct connection failed:', err.message);
-      // Fallback to SOCKS5 if direct fails and SOCKS is configured
       if (config.socks5.enabled && config.socks5.address) {
           log('Retrying with SOCKS5 proxy...');
           try {
@@ -956,7 +927,7 @@ async function RemoteSocketToWS(remoteSocket, webSocket, protocolResponseHeader,
     await remoteSocket.readable.pipeTo(new WritableStream({
       async write(chunk) {
         if (webSocket.readyState !== CONST.WS_READY_STATE.OPEN) throw new Error('WebSocket not open');
-        countUp(chunk.byteLength); // Count upstream traffic
+        countUp(chunk.byteLength);
         const payload = headerSent || !protocolResponseHeader
           ? chunk
           : await new Blob([protocolResponseHeader, chunk]).arrayBuffer();
@@ -1048,7 +1019,7 @@ async function socks5Connect(addressType, addressRemote, portRemote, log, parsed
 }
 
 
-// --- Subscription and Config Page (From S2) ---
+// --- Subscription and Config Page ---
 
 function generateRandomPath(length = 12, query = '') {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -1166,9 +1137,6 @@ async function handleIpSubscription(core, userID, hostName, env) {
   });
 }
 
-/**
- * Functional Scamalytics Lookup (from S2, but made secure)
- */
 async function handleScamalyticsLookup(request, cfg) {
     const url = new URL(request.url);
     const ip = url.searchParams.get('ip');
@@ -1185,7 +1153,6 @@ async function handleScamalyticsLookup(request, cfg) {
         });
     }
 
-    // Secure: Uses apiKey from cfg (which is from env secrets), not a hardcoded string
     const lookupUrl = `${baseUrl}?key=${apiKey}&ip=${encodeURIComponent(ip)}`;
     try {
         const res = await fetch(lookupUrl);
@@ -1200,16 +1167,13 @@ async function handleScamalyticsLookup(request, cfg) {
     }
 }
 
-function bytesToReadable(bytes = 0) {
+function bytesToReadablePage(bytes = 0) {
   if (!bytes) return '0 Bytes';
   const units = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
   const i = Math.floor(Math.log(bytes) / Math.log(1024));
   return `${parseFloat((bytes / (1024 ** i)).toFixed(2))} ${units[i]}`;
 }
 
-/**
- * Renders the beautiful config page from S2
- */
 function handleConfigPage(userID, hostName, cfg, userData) {
   const expDate = userData.expiration_date;
   const expTime = userData.expiration_time;
@@ -1295,7 +1259,7 @@ function handleConfigPage(userID, hostName, cfg, userData) {
 <div class="info-card-content">
 <h2 class="info-title">Data Usage</h2>
 <div class="data-usage-text" id="data-usage-display" data-usage="${dataUsage}" data-limit="${dataLimit}">
-${bytesToReadable(dataUsage)} / ${hasLimit ? bytesToReadable(dataLimit) : '&infin;'}
+${bytesToReadablePage(dataUsage)} / ${hasLimit ? bytesToReadablePage(dataLimit) : '&infin;'}
 </div>
 <div class="traffic-bar-container">
 <div class="traffic-bar" style="width:${pct}%"></div>
@@ -1442,7 +1406,6 @@ async function fetchClientPublicIP() {
 async function fetchScamalyticsInfo(ip) {
   if (!ip) return null;
   try {
-    // This is the functional endpoint
     const res = await fetch(\`/scamalytics-lookup?ip=\${encodeURIComponent(ip)}\`);
     if (!res.ok) {
         const errData = await res.json().catch(()=>({}));
@@ -1607,26 +1570,25 @@ document.addEventListener('DOMContentLoaded', () => {
 `;
 
 
-// --- Main Fetch Handler (Merged) ---
+// --- Main Fetch Handler ---
 export default {
     async fetch(request, env, ctx) {
         const url = new URL(request.url);
         const cfg = Config.fromEnv(env);
 
-        // 1. Admin Panel Routing (From S1)
+        // 1. Admin Panel Routing
         const adminResponse = await handleAdminRequest(request, env);
         if (adminResponse) {
             return adminResponse;
         }
 
-        // 2. Functional Scamalytics lookup (From S2, secured)
+        // 2. Scamalytics lookup
         if (url.pathname === '/scamalytics-lookup') {
             return handleScamalyticsLookup(request, cfg);
         }
 
-        // 3. WebSocket/VLESS Protocol Handling (Merged)
+        // 3. WebSocket/VLESS Protocol Handling
         if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
-             // Create config object for the handler, including SOCKS5 settings
              const requestConfig = {
                 userID: cfg.userID,
                 proxyIP: cfg.proxyIP,
@@ -1637,7 +1599,7 @@ export default {
              return ProtocolOverWSHandler(request, requestConfig, env, ctx);
         }
         
-        // 4. Subscription & Config Page Handling (Using S2's logic)
+        // 4. Subscription & Config Page Handling
         const handleSubscription = async (core) => {
             const uuid = url.pathname.slice(`/${core}/`.length).split('/')[0];
             if (!isValidUUID(uuid)) return new Response('Invalid UUID', { status: 400 });
@@ -1652,18 +1614,16 @@ export default {
         if (url.pathname.startsWith('/xray/')) return handleSubscription('xray');
         if (url.pathname.startsWith('/sb/')) return handleSubscription('sb');
 
-        // Config Page handling (main route)
         const path = url.pathname.slice(1);
         if (isValidUUID(path)) {
             const userData = await getUserData(env, path);
             if (!userData || isExpired(userData.expiration_date, userData.expiration_time) || !hasRemainingData(userData)) {
                 return new Response('Invalid or expired user', { status: 403 });
             }
-            // Use S2's beautiful config page handler
             return handleConfigPage(path, url.hostname, cfg, userData);
         }
         
-        // 5. Root Path Reverse Proxy (from S2)
+        // 5. Root Path Reverse Proxy
         if (cfg.rootProxyURL && url.pathname === '/') {
              try {
                 const upstream = new URL(cfg.rootProxyURL);
@@ -1694,12 +1654,11 @@ export default {
             }
         }
         
-        // Fallback for root path
         return new Response(`Not Found. Admin panel is at ${cfg.adminPath}`, { status: 404 });
     },
 };
 
-// --- UUID & Base64 Helpers (Needed by both) ---
+// --- UUID & WebSocket Helpers ---
 function base64ToArrayBuffer(base64Str) {
   if (!base64Str) return { earlyData: null, error: null };
   try {
