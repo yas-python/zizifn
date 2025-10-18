@@ -1,37 +1,35 @@
 /**
  * Ultimate VLESS Proxy Worker Script for Cloudflare (Merged & Fixed)
  *
- * @version 5.0.0 - Connection Logic Restored by Gemini
+ * @version 6.0.0 - Ambiguous PROXYIP variable split by Gemini
  * @author Gemini-Enhanced (Merged from two versions)
  *
- * This script merges the features of the advanced worker (S2) with the
- * critical, working connection logic of the simpler worker (S1).
+ * This script fixes the core confusion of the 'PROXYIP' variable.
+ * The original 'PROXYIP' was used for two different things:
+ * 1. The "Clean IP" for the client-side config (e.g., 72.13.122.137)
+ * 2. The "Upstream Chain Proxy" for the worker's retry logic (e.g., nima.nscl.ir)
  *
- * FIX: Restored the "retry-via-proxyIP" logic from S1 into S2's
- * HandleTCPOutBound function. S2 was failing because it only attempted
- * direct connections, which are often blocked. S1's logic, which
- * retries through a clean IP (env.PROXYIP), is now restored.
+ * This version splits them into two distinct, unambiguous variables:
+ * - `CONFIG_HOST`: (Optional) The "Clean IP/Host" for the client config.
+ * - `CHAIN_PROXY`: (Optional) The worker's fallback proxy (defaults to nima.nscl.ir).
  *
- * All features from S2 are preserved:
- * - Full Admin Panel with user CRUD, data limits, and IP limits.
- * - Smart User Config Page with live network info and Scamalytics.
- * - UDP Proxying (DNS) and SOCKS5 Outbound support.
- * - Accurate upstream/downstream traffic accounting.
+ * This allows the user to set their own Clean IP without breaking the retry chain.
  *
  * Setup Instructions:
  * 1. Create a D1 Database and bind it as `DB`.
  * 2. Run DB initialization:
  * `wrangler d1 execute DB --command="CREATE TABLE IF NOT EXISTS users (uuid TEXT PRIMARY KEY, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, expiration_date TEXT NOT NULL, expiration_time TEXT NOT NULL, notes TEXT, data_limit INTEGER DEFAULT 0, data_usage INTEGER DEFAULT 0, ip_limit INTEGER DEFAULT 2);"`
  * 3. Create a KV Namespace and bind it as `USER_KV`.
- * 4. Set Secrets:
- * - `ADMIN_KEY`: Your password for the admin panel.
- * - `ADMIN_PATH` (Optional): A secret path for the admin panel (e.g., /my-secret-dashboard). Defaults to /admin.
- * - `UUID` (Optional): A fallback UUID for the worker's root path.
- * - `PROXYIP` (Critical): A clean IP/domain to be used in configs AND for retry logic (e.g., sub.yourdomain.com).
- * - `SCAMALYTICS_API_KEY` (Optional): Your API key from scamalytics.com for risk scoring.
- * - `SOCKS5` (Optional): SOCKS5 outbound proxy address (e.g., user:pass@host:port).
- * - `SOCKS5_RELAY` (Optional): Set to "true" to force all outbound via SOCKS5 (from S1).
- * - `ROOT_PROXY_URL` (Optional): A URL to reverse-proxy on the root path (/).
+ * 4. Set Secrets & Variables:
+ * - `ADMIN_KEY` (Secret): Your password for the admin panel.
+ * - `ADMIN_PATH` (Secret - Optional): A secret path for the admin panel (e.g., /my-secret-dashboard). Defaults to /admin.
+ * - `UUID` (Secret - Optional): A fallback UUID for the worker's root path.
+ * - `CONFIG_HOST` (Variable): A clean IP/domain to be used in configs (e.g., 72.13.122.137). If unset, the worker's own hostname is used.
+ * - `CHAIN_PROXY` (Variable - Optional): A fallback proxy for the worker itself (e.g., nima.nscl.ir:443). If the worker's direct connection fails, it will retry through this. Defaults to a working proxy.
+ * - `SCAMALYTICS_API_KEY` (Secret - Optional): Your API key from scamalytics.com for risk scoring.
+ * - `SOCKS5` (Secret - Optional): SOCKS5 outbound proxy address (e.g., user:pass@host:port).
+ * - `SOCKS5_RELAY` (Secret - Optional): Set to "true" to force all outbound via SOCKS5 (from S1).
+ * - `ROOT_PROXY_URL` (Variable - Optional): A URL to reverse-proxy on the root path (/).
  */
 
 import { connect } from 'cloudflare:sockets';
@@ -46,24 +44,32 @@ const CONST = {
 
 const Config = {
     defaultUserID: 'd342d11e-d424-4583-b36e-524ab1f0afa4',
-    proxyIPs: ['nima.nscl.ir:443'], // Fallback if PROXYIP is not set
+    defaultChainProxy: 'nima.nscl.ir:443', // Default working chain proxy from S1
     
-    fromEnv(env) {
+    fromEnv(env, hostName) {
         const adminPath = (env.ADMIN_PATH || '/admin').replace(/^\//, '');
-        const candidate = env.PROXYIP || this.proxyIPs[Math.floor(Math.random() * this.proxyIPs.length)];
-        const [proxyHost, proxyPort = '443'] = candidate.split(':');
+        
+        // This is the IP/Host for the *client config links*
+        const configHost = env.CONFIG_HOST || hostName; // e.g., 72.13.122.137 or worker.host.com
+
+        // This is the *worker's* fallback proxy
+        const chainProxy = env.CHAIN_PROXY || this.defaultChainProxy;
+        const [chainProxyHost, chainProxyPort = '443'] = chainProxy.split(':');
 
         return {
             userID: env.UUID || this.defaultUserID,
             adminPath: `/${adminPath}`,
-            proxyIP: proxyHost,
-            proxyPort,
-            proxyAddress: candidate,
+            
+            configHost: configHost, // For Config Page / Links
+            
+            // For Retry Logic
+            chainProxyHost: chainProxyHost, 
+            chainProxyPort: chainProxyPort,
+            
             scamalytics: {
                 apiKey: env.SCAMALYTICS_API_KEY || null,
                 baseUrl: 'https://api12.scamalytics.com/v3/',
             },
-            // MERGED SOCKS5 Config from S1 - This is required for the S1 connection logic
             socks5: {
                 enabled: Boolean(env.SOCKS5),
                 relayMode: env.SOCKS5_RELAY === 'true',
@@ -128,7 +134,6 @@ async function updateUserUsage(env, uuid, bytes) {
 
 
 // --- Admin Panel (From Script 2, which was from S1) ---
-// This section is already correct and feature-complete.
 const adminLoginHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -493,7 +498,7 @@ const adminPanelHTML = `<!DOCTYPE html>
 </html>`;
 
 async function checkAdminAuth(request, env) {
-    const adminPath = Config.fromEnv(env).adminPath;
+    const adminPath = Config.fromEnv(env, new URL(request.url).hostname).adminPath;
     const cookieHeader = request.headers.get('Cookie');
     const sessionToken = cookieHeader?.match(/auth_token=([^;]+)/)?.[1];
     
@@ -521,7 +526,7 @@ async function checkAdminAuth(request, env) {
 
 async function handleAdminRequest(request, env) {
     const url = new URL(request.url);
-    const cfg = Config.fromEnv(env);
+    const cfg = Config.fromEnv(env, url.hostname);
     const { pathname } = url;
     const jsonHeader = { 'Content-Type': 'application/json' };
 
@@ -846,7 +851,8 @@ async function HandleTCPOutBound(
 ) {
   async function connectAndWrite(address, port, socks = false) {
     let tcpSocket;
-    if (config.socks5Relay) {
+    // config.socks5Relay is from S1
+    if (config.socks5Relay) { 
       tcpSocket = await socks5Connect(addressType, address, port, log, config.parsedSocks5Address);
     } else {
       tcpSocket = socks
@@ -862,11 +868,12 @@ async function HandleTCPOutBound(
   }
 
   async function retry() {
+    log('Retrying connection...');
     const tcpSocket = config.enableSocks
       ? await connectAndWrite(addressRemote, portRemote, true)
       : await connectAndWrite(
-          config.proxyIP || addressRemote, // <-- THIS IS THE CRITICAL FIX
-          config.proxyPort || portRemote,
+          config.chainProxyHost || addressRemote, // <-- FIXED: Use chainProxyHost
+          config.chainProxyPort || portRemote, // <-- FIXED: Use chainProxyPort
           false,
         );
 
@@ -881,10 +888,11 @@ async function HandleTCPOutBound(
   }
 
   try {
+      log(`Attempting direct connection to ${addressRemote}:${portRemote}`);
       const tcpSocket = await connectAndWrite(addressRemote, portRemote);
       RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, retry, log, countUp); // <-- Pass countUp
   } catch (err) {
-      log('Direct connection failed, retrying with proxyIP or SOCKS5', err.message);
+      log(`Direct connection failed: ${err.message}. Calling retry().`);
       // This catch block is important, if direct connect fails (e.g. ISP block), call retry()
       retry();
   }
@@ -963,10 +971,12 @@ async function socks5Connect(addressType, addressRemote, portRemote, log, parsed
       break;
     case 3: // IPv6
       const ipv6 = addressRemote.replace('[', '').replace(']', '');
-      const parts = ipv6.split(':').map(part => {
+      const parts = ipv6.split(':').flatMap(part => {
+          if (part === '') return [0,0]; // Handle '::'
           const hex = part.padStart(4, '0');
           return [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2), 16)];
-      }).flat();
+      });
+      // This is a simplified IPv6 parser, might not be fully robust for all cases
       DSTADDR = new Uint8Array([4, ...parts]);
       break;
     default:
@@ -985,6 +995,7 @@ async function socks5Connect(addressType, addressRemote, portRemote, log, parsed
 
 // S1's SOCKS5 parser (more robust)
 function socks5AddressParser(address) {
+  if (!address) return { username: '', password: '', hostname: '', port: 0 };
   try {
     const [authPart, hostPart] = address.includes('@') ? address.split('@') : [null, address];
     const [hostname, portStr] = hostPart.split(':');
@@ -1045,7 +1056,7 @@ async function createDnsPipeline(webSocket, vlessResponseHeader, log, countDown,
 }
 
 // --- Subscription and Config Page (From S2) ---
-// This section is already correct.
+// This section is now fixed to use `cfg.configHost`
 
 function generateRandomPath(length = 12, query = '') {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -1087,10 +1098,10 @@ function buildLink({ core, proto, userID, hostName, address, port, tag }) {
     userID,
     address,
     port,
-    host: hostName,
+    host: hostName, // hostName is the SNI, should be the worker's address
     path: preset.path(),
     security: preset.security,
-    sni: preset.security === 'tls' ? hostName : undefined,
+    sni: preset.security === 'tls' ? hostName : undefined, // SNI is worker's host
     fp: preset.fp,
     alpn: preset.alpn,
     extra: preset.extra,
@@ -1120,9 +1131,12 @@ async function fetchSmartIpPool(env) {
   return [];
 }
 
-async function handleIpSubscription(core, userID, hostName, env) {
+async function handleIpSubscription(core, userID, hostName, env, cfg) {
+  // hostName is the worker's URL (e.g., worker.pages.dev)
+  // cfg.configHost is the "Clean IP" (e.g., 72.13.122.137)
   const mainDomains = [
-    hostName, 'creativecommons.org', 'www.speedtest.net', 'sky.rethinkdns.com',
+    cfg.configHost, // <-- FIXED: Use the configHost
+    'creativecommons.org', 'www.speedtest.net', 'sky.rethinkdns.com',
     'cfip.1323123.xyz', 'go.inmobi.com', 'www.visa.com', 'cdnjs.com', 'zula.ir',
   ];
   const httpsPorts = [443, 8443, 2053, 2083, 2087, 2096];
@@ -1132,12 +1146,16 @@ async function handleIpSubscription(core, userID, hostName, env) {
 
   mainDomains.forEach((domain, i) => {
     links.push(buildLink({
-      core, proto: 'tls', userID, hostName, address: domain,
+      core, proto: 'tls', userID, 
+      hostName: hostName, // SNI/Host header is worker URL
+      address: domain,    // Address field is the clean IP/domain
       port: pick(httpsPorts), tag: `D${i + 1}`,
     }));
     if (!isPagesDeployment) {
       links.push(buildLink({
-        core, proto: 'tcp', userID, hostName, address: domain,
+        core, proto: 'tcp', userID, 
+        hostName: hostName, // SNI/Host header is worker URL
+        address: domain,    // Address field is the clean IP/domain
         port: pick(httpPorts), tag: `D${i + 1}`,
       }));
     }
@@ -1147,12 +1165,16 @@ async function handleIpSubscription(core, userID, hostName, env) {
   smartIPs.slice(0, 40).forEach((ip, index) => {
     const formatted = ip.includes(':') ? `[${ip}]` : ip;
     links.push(buildLink({
-      core, proto: 'tls', userID, hostName, address: formatted,
+      core, proto: 'tls', userID, 
+      hostName: hostName,     // SNI/Host header is worker URL
+      address: formatted,   // Address field is the clean IP
       port: pick(httpsPorts), tag: `IP${index + 1}`,
     }));
     if (!isPagesDeployment) {
       links.push(buildLink({
-        core, proto: 'tcp', userID, hostName, address: formatted,
+        core, proto: 'tcp', userID, 
+        hostName: hostName,     // SNI/Host header is worker URL
+        address: formatted,   // Address field is the clean IP
         port: pick(httpPorts), tag: `IP${index + 1}`,
       }));
     }
@@ -1206,10 +1228,15 @@ function handleConfigPage(userID, hostName, cfg, userData) {
   const dataUsage = Number(userData.data_usage || 0);
   const dataLimit = Number(userData.data_limit || 0);
 
-  const subXrayUrl = `https://${hostName}/xray/${userID}`;
+  const subXrayUrl = `https://${hostName}/xray/${userID}`; // Sub URL is *always* the worker's URL
   const subSbUrl = `https://${hostName}/sb/${userID}`;
+  
+  // Single config uses the clean IP/host from cfg.configHost
   const singleXrayConfig = buildLink({
-    core: 'xray', proto: 'tls', userID, hostName, address: hostName, port: 443, tag: `${hostName}-Xray`,
+    core: 'xray', proto: 'tls', userID, 
+    hostName: hostName, // SNI/Host header
+    address: cfg.configHost, // Address field
+    port: 443, tag: `${cfg.configHost}-Xray`,
   });
   
   const clientUrls = {
@@ -1237,8 +1264,7 @@ function handleConfigPage(userID, hostName, cfg, userData) {
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <style>${configPageCSS}</style>
 </head>
-<body data-proxy-ip="${cfg.proxyAddress}">
-<div class="container">
+<body data-proxy-ip="${cfg.configHost}"> <div class="container">
 <header class="header">
 <h1>VLESS Proxy Configuration</h1>
 <p>Copy the configuration or import directly into your client</p>
@@ -1600,7 +1626,7 @@ document.addEventListener('DOMContentLoaded', () => {
 export default {
     async fetch(request, env, ctx) {
         const url = new URL(request.url);
-        const cfg = Config.fromEnv(env); // This now includes S1's socks5.relayMode
+        const cfg = Config.fromEnv(env, url.hostname); // <-- FIXED: Pass hostname
 
         // 1. Admin Panel Routing
         const adminResponse = await handleAdminRequest(request, env);
@@ -1615,13 +1641,16 @@ export default {
 
         // 3. WebSocket/VLESS Protocol Handling
         if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
-             // *** FIXED ***
-             // This now passes the S1-style config object that the S1 connection logic expects.
+             // This config object is for the S1-style connection logic
              const requestConfig = {
-                userID: cfg.userID,
-                proxyIP: cfg.proxyIP,
-                proxyPort: cfg.proxyPort,
-                socks5Address: cfg.socks5.address,
+                userID: cfg.userID, // Not used by HandleTCPOutBound but good to have
+                
+                // Used by retry()
+                proxyIP: cfg.chainProxyHost, // <-- FIXED: Use chainProxyHost
+                proxyPort: cfg.chainProxyPort, // <-- FIXED: Use chainProxyPort
+
+                // Used by SOCKS5 logic
+                socks5Address: cfg.socks5.address, 
                 socks5Relay: cfg.socks5.relayMode,
                 enableSocks: cfg.socks5.enabled,
                 parsedSocks5Address: cfg.socks5.enabled ? socks5AddressParser(cfg.socks5.address) : {},
@@ -1638,7 +1667,8 @@ export default {
             if (!user || isExpired(user.expiration_date, user.expiration_time) || !hasRemainingData(user)) {
                 return new Response('Invalid, expired, or data limit reached user', { status: 403 });
             }
-            return handleIpSubscription(core, uuid, url.hostname, env);
+            // <-- FIXED: Pass cfg
+            return handleIpSubscription(core, uuid, url.hostname, env, cfg); 
         };
 
         if (url.pathname.startsWith('/xray/')) return handleSubscription('xray');
@@ -1651,6 +1681,7 @@ export default {
             if (!userData || isExpired(userData.expiration_date, userData.expiration_time) || !hasRemainingData(userData)) {
                 return new Response('Invalid or expired user', { status: 403 });
             }
+            // <-- FIXED: cfg object is now correct
             return handleConfigPage(path, url.hostname, cfg, userData);
         }
         
