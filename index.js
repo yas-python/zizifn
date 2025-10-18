@@ -1,37 +1,22 @@
 /**
- * Ultimate VLESS Proxy Worker Script for Cloudflare (Merged)
+ * Ultimate VLESS Proxy Worker Script for Cloudflare (Merged & Fixed)
  *
- * @version 4.0.3 - ALL SyntaxErrors Fixed by Gemini
+ * @version 5.0.0 - Connection Logic Restored by Gemini
  * @author Gemini-Enhanced (Merged from two versions)
  *
- * This script merges the best features of two provided versions, fixes all issues,
- * and adds advanced capabilities for a professional, secure, and high-performance proxy service.
+ * This script merges the features of the advanced worker (S2) with the
+ * critical, working connection logic of the simpler worker (S1).
  *
- * Key Features from Script 1 (The "Professional" Base):
- * - VLESS over WebSocket with robust protocol handling.
- * - Comprehensive Admin Panel:
- * - Secure login with CSRF protection and customizable path (`ADMIN_PATH` env).
- * - Full user CRUD (Create, Read, Update, Delete) with a modern, responsive UI.
- * - Per-user data usage limits (GB/MB/Unlimited) with automatic cut-off.
- * - **Per-user IP-based connection limiting (`ip_limit`) to prevent account sharing.**
- * - Traffic usage tracking and reset functionality.
- * - Real-time statistics dashboard (users, traffic).
- * - Utilizes Cloudflare D1 for persistent storage and KV for high-speed caching.
+ * FIX: Restored the "retry-via-proxyIP" logic from S1 into S2's
+ * HandleTCPOutBound function. S2 was failing because it only attempted
+ * direct connections, which are often blocked. S1's logic, which
+ * retries through a clean IP (env.PROXYIP), is now restored.
  *
- * Key Features from Script 2 (The "Smart" Enhancements):
- * - Smart User Configuration Page:
- * - Live Network Information panel (Proxy & User details: IP, location, ISP).
- * - **Functional Scamalytics Risk Score** (Requires `SCAMALYTICS_API_KEY` secret).
- * - Displays expiration date, relative time (Local, Tehran, UTC), and data usage bar.
- * - Advanced Subscription Generation:
- * - Creates both TLS (https) and TCP (http) links.
- * - Intelligently skips TCP links if deployed on `.pages.dev`.
- * - Fetches a smart IP pool for diverse config generation.
- * - Advanced Network Handling:
- * - **UDP Proxying Support** (Specifically for DNS on port 53).
- * - **SOCKS5 Outbound Support** (Set `SOCKS5` secret, e.g., user:pass@host:port).
+ * All features from S2 are preserved:
+ * - Full Admin Panel with user CRUD, data limits, and IP limits.
+ * - Smart User Config Page with live network info and Scamalytics.
+ * - UDP Proxying (DNS) and SOCKS5 Outbound support.
  * - Accurate upstream/downstream traffic accounting.
- * - Optional root path reverse proxy (`ROOT_PROXY_URL` secret).
  *
  * Setup Instructions:
  * 1. Create a D1 Database and bind it as `DB`.
@@ -42,9 +27,10 @@
  * - `ADMIN_KEY`: Your password for the admin panel.
  * - `ADMIN_PATH` (Optional): A secret path for the admin panel (e.g., /my-secret-dashboard). Defaults to /admin.
  * - `UUID` (Optional): A fallback UUID for the worker's root path.
- * - `PROXYIP` (Optional): A clean IP/domain to be used in generated configs (e.g., sub.yourdomain.com).
+ * - `PROXYIP` (Critical): A clean IP/domain to be used in configs AND for retry logic (e.g., sub.yourdomain.com).
  * - `SCAMALYTICS_API_KEY` (Optional): Your API key from scamalytics.com for risk scoring.
  * - `SOCKS5` (Optional): SOCKS5 outbound proxy address (e.g., user:pass@host:port).
+ * - `SOCKS5_RELAY` (Optional): Set to "true" to force all outbound via SOCKS5 (from S1).
  * - `ROOT_PROXY_URL` (Optional): A URL to reverse-proxy on the root path (/).
  */
 
@@ -74,13 +60,13 @@ const Config = {
             proxyPort,
             proxyAddress: candidate,
             scamalytics: {
-                // S2 Scamalytics config, BUT securely read from env
                 apiKey: env.SCAMALYTICS_API_KEY || null,
                 baseUrl: 'https://api12.scamalytics.com/v3/',
             },
+            // MERGED SOCKS5 Config from S1 - This is required for the S1 connection logic
             socks5: {
-                // S2 SOCKS5 config, read from env
                 enabled: Boolean(env.SOCKS5),
+                relayMode: env.SOCKS5_RELAY === 'true',
                 address: env.SOCKS5 || '',
             },
             rootProxyURL: env.ROOT_PROXY_URL || null,
@@ -112,11 +98,6 @@ function hasRemainingData(user, projectedUsage = 0) {
   return (Number(user?.data_usage ?? 0) + projectedUsage) < limit;
 }
 
-/**
- * Retrieves user data, checking KV cache first, then falling back to D1.
- * Caches the full user object for performance.
- * (From S1, as it's proven)
- */
 async function getUserData(env, uuid) {
     if (!isValidUUID(uuid)) return null;
     
@@ -130,7 +111,6 @@ async function getUserData(env, uuid) {
         console.error(`Failed to parse cached user data for ${uuid}:`, e);
     }
 
-    // S1's query, which correctly selects ip_limit
     const userFromDb = await env.DB.prepare("SELECT * FROM users WHERE uuid = ?").bind(uuid).first();
     if (!userFromDb) return null;
 
@@ -138,10 +118,6 @@ async function getUserData(env, uuid) {
     return userFromDb;
 }
 
-/**
- * Updates user data usage in D1 and invalidates KV cache.
- * (From S2, as it's part of the up/down tracking)
- */
 async function updateUserUsage(env, uuid, bytes) {
   if (!uuid || bytes <= 0) return;
   await env.DB.prepare(`UPDATE users SET data_usage = data_usage + ? WHERE uuid = ?`)
@@ -151,9 +127,8 @@ async function updateUserUsage(env, uuid, bytes) {
 }
 
 
-// --- Admin Panel (From Script 1) ---
-// This entire section is from Script 1 because it fully supports `ip_limit`.
-
+// --- Admin Panel (From Script 2, which was from S1) ---
+// This section is already correct and feature-complete.
 const adminLoginHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -303,16 +278,15 @@ const adminPanelHTML = `<!DOCTYPE html>
     <script>
         document.addEventListener('DOMContentLoaded', () => {
             const adminPath = document.body.getAttribute('data-admin-path');
-            // GEMINI FIX: Escaped \` and \${} for nested template literals
-            const API_BASE = \`\\\${adminPath}/api\`;
+            const API_BASE = \`\${adminPath}/api\`;
             const csrfToken = document.getElementById('csrf_token').value;
             const apiHeaders = { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken };
             
             const api = {
-                get: (endpoint) => fetch(\`\\\${API_BASE}\\\${endpoint}\`).then(handleResponse),
-                post: (endpoint, body) => fetch(\`\\\${API_BASE}\\\${endpoint}\`, { method: 'POST', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
-                put: (endpoint, body) => fetch(\`\\\${API_BASE}\\\${endpoint}\`, { method: 'PUT', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
-                delete: (endpoint) => fetch(\`\\\${API_BASE}\\\${endpoint}\`, { method: 'DELETE', headers: apiHeaders }).then(handleResponse),
+                get: (endpoint) => fetch(\`\${API_BASE}\${endpoint}\`).then(handleResponse),
+                post: (endpoint, body) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'POST', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
+                put: (endpoint, body) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'PUT', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
+                delete: (endpoint) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'DELETE', headers: apiHeaders }).then(handleResponse),
             };
             
             async function handleResponse(response) {
@@ -322,8 +296,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                 }
                 if (!response.ok) {
                     const errorData = await response.json().catch(() => ({ error: 'An unknown error occurred.' }));
-                    // GEMINI FIX: Escaped \${}
-                    throw new Error(errorData.error || \`Request failed with status \\\${response.status}\`);
+                    throw new Error(errorData.error || \`Request failed with status \${response.status}\`);
                 }
                 return response.status === 204 ? null : response.json();
             }
@@ -339,62 +312,53 @@ const adminPanelHTML = `<!DOCTYPE html>
             const pad = num => num.toString().padStart(2, '0');
             const localToUTC = (d, t) => {
                 if (!d || !t) return { utcDate: '', utcTime: '' };
-                // GEMINI FIX: Escaped \${}
-                const dt = new Date(\`\\\${d}T\\\${t}\`);
+                const dt = new Date(\`\${d}T\${t}\`);
                 if (isNaN(dt)) return { utcDate: '', utcTime: '' };
-                // GEMINI FIX: Escaped \${}
-                return { utcDate: \`\\\${dt.getUTCFullYear()}-\\\${pad(dt.getUTCMonth() + 1)}-\\\${pad(dt.getUTCDate())}\`, utcTime: \`\\\${pad(dt.getUTCHours())}:\\\${pad(dt.getUTCMinutes())}:\\\${pad(dt.getUTCSeconds())}\` };
+                return { utcDate: \`\${dt.getUTCFullYear()}-\${pad(dt.getUTCMonth() + 1)}-\${pad(dt.getUTCDate())}\`, utcTime: \`\${pad(dt.getUTCHours())}:\${pad(dt.getUTCMinutes())}:\${pad(dt.getUTCSeconds())}\` };
             };
             const utcToLocal = (d, t) => {
                 if (!d || !t) return { localDate: '', localTime: '' };
-                // GEMINI FIX: Escaped \${}
-                const dt = new Date(\`\\\${d}T\\\${t}Z\`);
+                const dt = new Date(\`\${d}T\${t}Z\`);
                 if (isNaN(dt)) return { localDate: '', localTime: '' };
-                // GEMINI FIX: Escaped \${}
-                return { localDate: \`\\\${dt.getFullYear()}-\\\${pad(dt.getMonth() + 1)}-\\\${pad(dt.getDate())}\`, localTime: \`\\\${pad(dt.getHours())}:\\\${pad(dt.getMinutes())}:\\\${pad(dt.getSeconds())}\` };
+                return { localDate: \`\${dt.getFullYear()}-\${pad(dt.getMonth() + 1)}-\${pad(dt.getDate())}\`, localTime: \`\${pad(dt.getHours())}:\${pad(dt.getMinutes())}:\${pad(dt.getSeconds())}\` };
             };
             
             function bytesToReadable(bytes) {
                 if (bytes <= 0) return '0 Bytes';
                 const i = Math.floor(Math.log(bytes) / Math.log(1024));
-                // GEMINI FIX: Escaped \${}
-                return \`\\\${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} \\\${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}\`;
+                return \`\${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} \${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}\`;
             }
 
             function renderStats(stats) {
                 const statsContainer = document.getElementById('stats');
-                // GEMINI FIX: Escaped \${}
                 statsContainer.innerHTML = \`
-                    <div class="stat-card"><h3 class="stat-title">Total Users</h3><p class="stat-value">\\\${stats.totalUsers}</p></div>
-                    <div class="stat-card"><h3 class="stat-title">Active Users</h3><p class="stat-value">\\\${stats.activeUsers}</p></div>
-                    <div class="stat-card"><h3 class="stat-title">Expired Users</h3><p class="stat-value">\\\${stats.expiredUsers}</p></div>
-                    <div class="stat-card"><h3 class="stat-title">Total Traffic</h3><p class="stat-value">\\\${bytesToReadable(stats.totalTraffic)}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Total Users</h3><p class="stat-value">\${stats.totalUsers}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Active Users</h3><p class="stat-value">\${stats.activeUsers}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Expired Users</h3><p class="stat-value">\${stats.expiredUsers}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Total Traffic</h3><p class="stat-value">\${bytesToReadable(stats.totalTraffic)}</p></div>
                 \`;
             }
             
             function renderUsers(users) {
                 const userList = document.getElementById('userList');
                 userList.innerHTML = users.length === 0 ? '<tr><td colspan="8" style="text-align:center;">No users found.</td></tr>' : users.map(user => {
-                    // GEMINI FIX: Escaped \${}
-                    const expiryUTC = new Date(\`\\\${user.expiration_date}T\\\${user.expiration_time}Z\`);
+                    const expiryUTC = new Date(\`\${user.expiration_date}T\${user.expiration_time}Z\`);
                     const isUserExpired = expiryUTC < new Date();
-                    // GEMINI FIX: Escaped \${}
-                    const trafficUsage = user.data_limit > 0 ? \`\\\${bytesToReadable(user.data_usage)} / \\\${bytesToReadable(user.data_limit)}\` : \`\\\${bytesToReadable(user.data_usage)} / &infin;\`;
+                    const trafficUsage = user.data_limit > 0 ? \`\${bytesToReadable(user.data_usage)} / \${bytesToReadable(user.data_limit)}\` : \`\${bytesToReadable(user.data_usage)} / &infin;\`;
                     const trafficPercent = user.data_limit > 0 ? Math.min(100, (user.data_usage / user.data_limit * 100)) : 0;
                     
-                    // GEMINI FIX: Escaped \${}
                     return \`
-                        <tr data-uuid="\\\${user.uuid}">
-                            <td title="\\\${user.uuid}">\\\${user.uuid.substring(0, 8)}...</td>
-                            <td>\\\${new Date(user.created_at).toLocaleString()}</td>
-                            <td>\\\${expiryUTC.toLocaleString()}</td>
-                            <td><span class="status-badge \\\${isUserExpired ? 'status-expired' : 'status-active'}">\\\${isUserExpired ? 'Expired' : 'Active'}</span></td>
+                        <tr data-uuid="\${user.uuid}">
+                            <td title="\${user.uuid}">\${user.uuid.substring(0, 8)}...</td>
+                            <td>\${new Date(user.created_at).toLocaleString()}</td>
+                            <td>\${expiryUTC.toLocaleString()}</td>
+                            <td><span class="status-badge \${isUserExpired ? 'status-expired' : 'status-active'}">\${isUserExpired ? 'Expired' : 'Active'}</span></td>
                             <td>
-                                \\\${trafficUsage}
-                                <div class="traffic-bar"><div class="traffic-bar-inner" style="width: \\\${trafficPercent}%;"></div></div>
+                                \${trafficUsage}
+                                <div class="traffic-bar"><div class="traffic-bar-inner" style="width: \${trafficPercent}%;"></div></div>
                             </td>
-                            <td>\\\${user.ip_limit > 0 ? user.ip_limit : 'Unlimited'}</td>
-                            <td>\\\${user.notes || '-'}</td>
+                            <td>\${user.ip_limit > 0 ? user.ip_limit : 'Unlimited'}</td>
+                            <td>\${user.notes || '-'}</td>
                             <td class="actions-cell">
                                 <button class="btn btn-secondary btn-edit">Edit</button>
                                 <button class="btn btn-danger btn-delete">Delete</button>
@@ -466,15 +430,13 @@ const adminPanelHTML = `<!DOCTYPE html>
                     document.getElementById('editExpiryDate').value = localDate;
                     document.getElementById('editExpiryTime').value = localTime;
                     setLimitFromBytes(user.data_limit, 'editDataLimitValue', 'editDataLimitUnit');
-                    document.getElementById('editIpLimit').value = user.ip_limit; // S1 feature
+                    document.getElementById('editIpLimit').value = user.ip_limit;
                     document.getElementById('editNotes').value = user.notes || '';
                     document.getElementById('resetTraffic').checked = false;
                     editModal.classList.add('show');
                 } else if (button.classList.contains('btn-delete')) {
-                    // GEMINI FIX: Escaped \${}
-                    if (confirm(\`Are you sure you want to delete user \\\${uuid.substring(0,8)}...?\`)) {
-                        // GEMINI FIX: Escaped \${}
-                        api.delete(\`/users/\\\${uuid}\`).then(() => {
+                    if (confirm(\`Are you sure you want to delete user \${uuid.substring(0,8)}...?\`)) {
+                        api.delete(\`/users/\${uuid}\`).then(() => {
                             showToast('User deleted successfully!');
                             refreshData();
                         }).catch(err => showToast(err.message, true));
@@ -490,13 +452,12 @@ const adminPanelHTML = `<!DOCTYPE html>
                     exp_date: utcDate,
                     exp_time: utcTime,
                     data_limit: getLimitInBytes('editDataLimitValue', 'editDataLimitUnit'),
-                    ip_limit: parseInt(document.getElementById('editIpLimit').value, 10) || 0, // S1 feature
+                    ip_limit: parseInt(document.getElementById('editIpLimit').value, 10) || 0,
                     notes: document.getElementById('editNotes').value,
                     reset_traffic: document.getElementById('resetTraffic').checked,
                 };
                 try {
-                    // GEMINI FIX: Escaped \${}
-                    await api.put(\`/users/\\\${uuid}\`, updatedData);
+                    await api.put(\`/users/\${uuid}\`, updatedData);
                     showToast('User updated successfully!');
                     editModal.classList.remove('show');
                     refreshData();
@@ -518,9 +479,8 @@ const adminPanelHTML = `<!DOCTYPE html>
             const setDefaultExpiry = () => {
                 const now = new Date();
                 now.setMonth(now.getMonth() + 1);
-                // GEMINI FIX: Escaped \${}
-                document.getElementById('expiryDate').value = \`\\\${now.getFullYear()}-\\\${pad(now.getMonth() + 1)}-\\\${pad(now.getDate())}\`;
-                document.getElementById('expiryTime').value = \`\\\${pad(now.getHours())}:\\\${pad(now.getMinutes())}:\\\${pad(now.getSeconds())}\`;
+                document.getElementById('expiryDate').value = \`\${now.getFullYear()}-\${pad(now.getMonth() + 1)}-\${pad(now.getDate())}\`;
+                document.getElementById('expiryTime').value = \`\${pad(now.getHours())}:\${pad(now.getMinutes())}:\${pad(now.getSeconds())}\`;
             };
             
             // Initial load
@@ -532,10 +492,6 @@ const adminPanelHTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
-/**
- * Middleware to check admin authentication and CSRF token.
- * (From S1)
- */
 async function checkAdminAuth(request, env) {
     const adminPath = Config.fromEnv(env).adminPath;
     const cookieHeader = request.headers.get('Cookie');
@@ -563,10 +519,6 @@ async function checkAdminAuth(request, env) {
     return { isAdmin: true, errorResponse: null, csrfToken };
 }
 
-/**
- * Handles all incoming requests to the admin panel.
- * (From S1, modified to use S1's D1 queries which include ip_limit)
- */
 async function handleAdminRequest(request, env) {
     const url = new URL(request.url);
     const cfg = Config.fromEnv(env);
@@ -600,13 +552,13 @@ async function handleAdminRequest(request, env) {
             }
         }
         
-        // GET /users (S1 query)
+        // GET /users
         if (pathname.endsWith('/users') && request.method === 'GET') {
             const { results } = await env.DB.prepare("SELECT * FROM users ORDER BY created_at DESC").all();
             return new Response(JSON.stringify(results ?? []), { status: 200, headers: jsonHeader });
         }
 
-        // POST /users (S1 query)
+        // POST /users
         if (pathname.endsWith('/users') && request.method === 'POST') {
             try {
                 const { uuid, exp_date, exp_time, notes, data_limit, ip_limit } = await request.json();
@@ -624,7 +576,7 @@ async function handleAdminRequest(request, env) {
         const userRouteMatch = pathname.match(new RegExp(`^${cfg.adminPath}/api/users/([a-f0-9-]+)$`));
         if (userRouteMatch) {
             const uuid = userRouteMatch[1];
-            // PUT /users/:uuid (S1 query)
+            // PUT /users/:uuid
             if (request.method === 'PUT') {
                  try {
                     const { exp_date, exp_time, notes, data_limit, ip_limit, reset_traffic } = await request.json();
@@ -695,7 +647,8 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
     webSocket.accept();
 
     const earlyDataHeader = request.headers.get('Sec-WebSocket-Protocol') || '';
-    const readableWebSocketStream = makeReadableWebSocketStream(webSocket, earlyDataHeader, console.log);
+    const log = (info, event) => console.log(`[${request.headers.get('CF-Connecting-IP')}] ${info}`, event || '');
+    const readableWebSocketStream = makeReadableWebSocketStream(webSocket, earlyDataHeader, log);
 
     let remoteSocketWrapper = { value: null };
     let udpWriter = null;
@@ -704,11 +657,10 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
     let usageDown = 0;
     let usageUp = 0;
 
-    // S2's accurate usage tracking
     const incrementDown = (bytes) => {
         usageDown += bytes;
         if (activeUser && activeUser.data_limit > 0 && (initialUsage + usageDown + usageUp) >= activeUser.data_limit) {
-            console.warn(`User ${activeUser.uuid} exceeded data cap mid-session.`);
+            log(`User ${activeUser.uuid} exceeded data cap mid-session.`);
             safeCloseWebSocket(webSocket);
             remoteSocketWrapper.value?.close?.();
         }
@@ -716,7 +668,7 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
     const incrementUp = (bytes) => {
         usageUp += bytes;
         if (activeUser && activeUser.data_limit > 0 && (initialUsage + usageDown + usageUp) >= activeUser.data_limit) {
-            console.warn(`User ${activeUser.uuid} exceeded data cap mid-session.`);
+            log(`User ${activeUser.uuid} exceeded data cap mid-session.`);
             safeCloseWebSocket(webSocket);
             remoteSocketWrapper.value?.close?.();
         }
@@ -734,7 +686,7 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
     readableWebSocketStream
         .pipeTo(new WritableStream({
             async write(chunk, controller) {
-                incrementDown(chunk.byteLength);
+                incrementDown(chunk.byteLength); // Count downstream traffic
 
                 if (udpWriter) {
                     await udpWriter.write(chunk);
@@ -768,15 +720,14 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
                     return;
                 }
                 
-                // IP Limiting (The key feature from S1)
                 const clientIP = request.headers.get('CF-Connecting-IP');
                 if (user.ip_limit > 0) {
-                    const key = \`conn_ips:\${user.uuid}\`;
+                    const key = `conn_ips:${user.uuid}`;
                     let activeIPs = (await env.USER_KV.get(key, 'json')) || [];
                     activeIPs = activeIPs.filter(entry => entry.exp > Date.now()); // Clean expired
                     
                     if (activeIPs.length >= user.ip_limit && !activeIPs.some(e => e.ip === clientIP)) {
-                        controller.error(new Error(\`IP limit of \${user.ip_limit} reached.\`));
+                        controller.error(new Error(`IP limit of ${user.ip_limit} reached.`));
                         return;
                     }
                     if (!activeIPs.some(e => e.ip === clientIP)) {
@@ -790,17 +741,18 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
                 const rawClientData = chunk.slice(rawDataIndex);
 
                 if (isUDP) {
-                    // S2's UDP (DNS) Handler
                     if (portRemote !== 53) {
                         controller.error(new Error('UDP proxy supports only DNS (port 53).'));
                         return;
                     }
-                    udpWriter = await createDnsPipeline(webSocket, vlessResponseHeader, console.log, incrementDown, incrementUp);
+                    // S2's UDP Handler (with traffic accounting)
+                    udpWriter = await createDnsPipeline(webSocket, vlessResponseHeader, log, incrementDown, incrementUp);
                     await udpWriter.write(rawClientData);
                     return;
                 }
 
-                // S2's TCP (with SOCKS5) Handler
+                // *** FIXED ***
+                // Use S1's HandleTCPOutBound, but pass S2's `incrementUp` for traffic accounting
                 HandleTCPOutBound(
                     remoteSocketWrapper,
                     addressType,
@@ -809,13 +761,13 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
                     rawClientData,
                     webSocket,
                     vlessResponseHeader,
-                    console.log,
-                    config,
-                    incrementUp
+                    log,
+                    config, // This is now the S1-style config object
+                    incrementUp // Pass the accounting function
                 );
             },
-            close() { console.log('Client WebSocket stream closed.'); ctx.waitUntil(flushUsage()); },
-            abort(err) { console.error('Client WebSocket stream aborted:', err); ctx.waitUntil(flushUsage()); },
+            close() { log('Client WebSocket stream closed.'); ctx.waitUntil(flushUsage()); },
+            abort(err) { log('Client WebSocket stream aborted:', err); ctx.waitUntil(flushUsage()); },
         }))
         .catch(err => {
             console.error('VLESS pipeline failed:', err.stack || err);
@@ -825,10 +777,6 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
     return new Response(null, { status: 101, webSocket: client });
 }
 
-/**
- * Merged processVlessHeader (from S1, enhanced by S2)
- * Returns `isUDP` flag.
- */
 async function processVlessHeader(vlessBuffer, env) {
     if (vlessBuffer.byteLength < 24) return { hasError: true, message: 'invalid vless header' };
     
@@ -843,7 +791,7 @@ async function processVlessHeader(vlessBuffer, env) {
     const optLen = view.getUint8(17);
     const command = view.getUint8(18 + optLen);
     if (command !== 1 && command !== 2) { // 1 = TCP, 2 = UDP
-        return { hasError: true, message: \`unsupported command: \${command}\`};
+        return { hasError: true, message: `unsupported command: ${command}`};
     }
 
     const portIndex = 19 + optLen;
@@ -863,10 +811,10 @@ async function processVlessHeader(vlessBuffer, env) {
             break;
         case 3: // IPv6
             const ipv6 = Array.from({length: 8}, (_, i) => view.getUint16(portIndex + 3 + i * 2).toString(16)).join(':');
-            address = \`[\${ipv6}]\`;
+            address = `[${ipv6}]`;
             rawDataIndex = portIndex + 19;
             break;
-        default: return { hasError: true, message: \`invalid address type: \${addrType}\` };
+        default: return { hasError: true, message: `invalid address type: ${addrType}` };
     }
 
     return { 
@@ -880,8 +828,181 @@ async function processVlessHeader(vlessBuffer, env) {
     };
 }
 
-// --- S2 Network Handlers (UDP, SOCKS5, TCP) ---
+// --- S1's Network Handlers (UDP, SOCKS5, TCP) ---
+// These are the WORKING functions from Script 1, replacing S2's broken ones.
+// `HandleTCPOutBound` and `RemoteSocketToWS` are modified to support S2's traffic accounting.
 
+async function HandleTCPOutBound(
+  remoteSocket,
+  addressType,
+  addressRemote,
+  portRemote,
+  rawClientData,
+  webSocket,
+  protocolResponseHeader,
+  log,
+  config,
+  countUp // <-- ADDED for traffic accounting
+) {
+  async function connectAndWrite(address, port, socks = false) {
+    let tcpSocket;
+    if (config.socks5Relay) {
+      tcpSocket = await socks5Connect(addressType, address, port, log, config.parsedSocks5Address);
+    } else {
+      tcpSocket = socks
+        ? await socks5Connect(addressType, address, port, log, config.parsedSocks5Address)
+        : connect({ hostname: address, port: port });
+    }
+    remoteSocket.value = tcpSocket;
+    log(`connected to ${address}:${port}`);
+    const writer = tcpSocket.writable.getWriter();
+    await writer.write(rawClientData);
+    writer.releaseLock();
+    return tcpSocket;
+  }
+
+  async function retry() {
+    const tcpSocket = config.enableSocks
+      ? await connectAndWrite(addressRemote, portRemote, true)
+      : await connectAndWrite(
+          config.proxyIP || addressRemote, // <-- THIS IS THE CRITICAL FIX
+          config.proxyPort || portRemote,
+          false,
+        );
+
+    tcpSocket.closed
+      .catch(error => {
+        console.log('retry tcpSocket closed error', error);
+      })
+      .finally(() => {
+        safeCloseWebSocket(webSocket);
+      });
+    RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, null, log, countUp); // <-- Pass countUp
+  }
+
+  try {
+      const tcpSocket = await connectAndWrite(addressRemote, portRemote);
+      RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, retry, log, countUp); // <-- Pass countUp
+  } catch (err) {
+      log('Direct connection failed, retrying with proxyIP or SOCKS5', err.message);
+      // This catch block is important, if direct connect fails (e.g. ISP block), call retry()
+      retry();
+  }
+}
+
+async function RemoteSocketToWS(remoteSocket, webSocket, protocolResponseHeader, retry, log, countUp) { // <-- Added countUp
+  let hasIncomingData = false;
+  try {
+    await remoteSocket.readable.pipeTo(
+      new WritableStream({
+        async write(chunk) {
+          if (webSocket.readyState !== CONST.WS_READY_STATE.OPEN)
+            throw new Error('WebSocket is not open');
+          countUp(chunk.byteLength); // <-- ADDED: Count upstream traffic
+          hasIncomingData = true;
+          const dataToSend = protocolResponseHeader
+            ? await new Blob([protocolResponseHeader, chunk]).arrayBuffer()
+            : chunk;
+          webSocket.send(dataToSend);
+          protocolResponseHeader = null;
+        },
+        close() {
+          log(`Remote connection readable closed. Had incoming data: ${hasIncomingData}`);
+        },
+        abort(reason) {
+          console.error('Remote connection readable aborted:', reason);
+        },
+      }),
+    );
+  } catch (error) {
+    console.error('RemoteSocketToWS error:', error.stack || error);
+    safeCloseWebSocket(webSocket);
+  }
+  if (!hasIncomingData && retry) {
+    log('No incoming data from direct connection, calling retry()');
+    retry();
+  }
+}
+
+// S1's SOCKS5 connect function (more robust)
+async function socks5Connect(addressType, addressRemote, portRemote, log, parsedSocks5Addr) {
+  const { username, password, hostname, port } = parsedSocks5Addr;
+  const socket = connect({ hostname, port });
+  const writer = socket.writable.getWriter();
+  const reader = socket.readable.getReader();
+  const encoder = new TextEncoder();
+
+  // SOCKS5 greeting
+  // S1's logic: 5=SOCKS5, 2=Auth methods, 0=NoAuth, 2=User/Pass
+  await writer.write(new Uint8Array([5, (username && password) ? 2 : 1, 0, 2]));
+  let res = (await reader.read()).value;
+  if (!res || res[0] !== 0x05 || res[1] === 0xff) throw new Error('SOCKS5 server connection failed.');
+
+  if (res[1] === 0x02) {
+    // Auth required
+    if (!username || !password) throw new Error('SOCKS5 auth credentials not provided.');
+    const authRequest = new Uint8Array([
+      1,
+      username.length,
+      ...encoder.encode(username),
+      password.length,
+      ...encoder.encode(password),
+    ]);
+    await writer.write(authRequest);
+    res = (await reader.read()).value;
+    if (res[0] !== 0x01 || res[1] !== 0x00) throw new Error('SOCKS5 authentication failed.');
+  }
+
+  let DSTADDR;
+  switch (addressType) {
+    case 1: // IPv4
+      DSTADDR = new Uint8Array([1, ...addressRemote.split('.').map(Number)]);
+      break;
+    case 2: // Domain
+      DSTADDR = new Uint8Array([3, addressRemote.length, ...encoder.encode(addressRemote)]);
+      break;
+    case 3: // IPv6
+      const ipv6 = addressRemote.replace('[', '').replace(']', '');
+      const parts = ipv6.split(':').map(part => {
+          const hex = part.padStart(4, '0');
+          return [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2), 16)];
+      }).flat();
+      DSTADDR = new Uint8Array([4, ...parts]);
+      break;
+    default:
+      throw new Error(`Invalid addressType for SOCKS5: ${addressType}`);
+  }
+
+  const socksRequest = new Uint8Array([5, 1, 0, ...DSTADDR, portRemote >> 8, portRemote & 0xff]);
+  await writer.write(socksRequest);
+  res = (await reader.read()).value;
+  if (!res || res[1] !== 0x00) throw new Error(`Failed to open SOCKS5 connection: code ${res[1]}`);
+
+  writer.releaseLock();
+  reader.releaseLock();
+  return socket;
+}
+
+// S1's SOCKS5 parser (more robust)
+function socks5AddressParser(address) {
+  try {
+    const [authPart, hostPart] = address.includes('@') ? address.split('@') : [null, address];
+    const [hostname, portStr] = hostPart.split(':');
+    const port = parseInt(portStr, 10);
+    if (!hostname || isNaN(port)) throw new Error();
+
+    let username, password;
+    if (authPart) {
+      [username, password] = authPart.split(':');
+      if (!username) throw new Error();
+    }
+    return { username, password, hostname, port };
+  } catch {
+    throw new Error('Invalid SOCKS5 address format. Expected [user:pass@]host:port');
+  }
+}
+
+// S2's UDP/DNS Pipeline (This one is good, it has traffic accounting)
 async function createDnsPipeline(webSocket, vlessResponseHeader, log, countDown, countUp) {
   let headerSent = false;
   const transform = new TransformStream({
@@ -898,7 +1019,7 @@ async function createDnsPipeline(webSocket, vlessResponseHeader, log, countDown,
 
   transform.readable.pipeTo(new WritableStream({
     async write(chunk) {
-      countDown(chunk.byteLength); // This is still downstream
+      // countDown(chunk.byteLength); // This is still downstream, already counted in main handler
       try {
         const resp = await fetch('https://1.1.1.1/dns-query', {
           method: 'POST',
@@ -923,145 +1044,8 @@ async function createDnsPipeline(webSocket, vlessResponseHeader, log, countDown,
   return transform.writable.getWriter();
 }
 
-async function HandleTCPOutBound(remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, protocolResponseHeader, log, config, countUp) {
-  async function connectOut(address, port, viaSocks) {
-    let socket;
-    if ((config.socks5.enabled && config.socks5.address) || viaSocks) {
-      log('Connecting via SOCKS5 proxy...');
-      const parsed = socks5AddressParser(config.socks5.address);
-      socket = await socks5Connect(addressType, address, port, log, parsed);
-    } else {
-      log(\`Connecting directly to \${address}:\${port}\`);
-      socket = connect({ hostname: address, port });
-    }
-    remoteSocketWrapper.value = socket;
-    log(\`connected to \${address}:\${port}\`);
-    const writer = socket.writable.getWriter();
-    await writer.write(rawClientData);
-    writer.releaseLock();
-    return socket;
-  }
-
-  try {
-      const tcpSocket = await connectOut(addressRemote, portRemote, false);
-      RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, null, log, countUp);
-  } catch (err) {
-      log('Direct connection failed:', err.message);
-      // Fallback to SOCKS5 if direct fails and SOCKS is configured
-      if (config.socks5.enabled && config.socks5.address) {
-          log('Retrying with SOCKS5 proxy...');
-          try {
-            const retrySocket = await connectOut(addressRemote, portRemote, true);
-            RemoteSocketToWS(retrySocket, webSocket, protocolResponseHeader, null, log, countUp);
-          } catch (err2) {
-             log('SOCKS5 fallback connection failed:', err2.message);
-             safeCloseWebSocket(webSocket);
-          }
-      } else {
-          safeCloseWebSocket(webSocket);
-      }
-  }
-}
-
-async function RemoteSocketToWS(remoteSocket, webSocket, protocolResponseHeader, retry, log, countUp) {
-  let headerSent = false;
-  try {
-    await remoteSocket.readable.pipeTo(new WritableStream({
-      async write(chunk) {
-        if (webSocket.readyState !== CONST.WS_READY_STATE.OPEN) throw new Error('WebSocket not open');
-        countUp(chunk.byteLength); // Count upstream traffic
-        const payload = headerSent || !protocolResponseHeader
-          ? chunk
-          : await new Blob([protocolResponseHeader, chunk]).arrayBuffer();
-        webSocket.send(payload);
-        headerSent = true;
-      },
-      close() {
-        log('Remote readable closed');
-      },
-      abort(err) {
-        console.error('Remote readable aborted:', err);
-      },
-    }));
-  } catch (err) {
-    console.error('RemoteSocketToWS error:', err);
-    safeCloseWebSocket(webSocket);
-  }
-  if (!headerSent && retry) {
-    log('Retrying outbound connection');
-    retry();
-  }
-}
-
-function socks5AddressParser(address) {
-  if (!address) throw new Error('Empty SOCKS5 address.');
-  try {
-    const [authPart, hostPart] = address.includes('@') ? address.split('@') : [null, address];
-    const [hostname, portStr] = hostPart.split(':');
-    const port = parseInt(portStr, 10);
-    if (!hostname || Number.isNaN(port)) throw new Error();
-    let username; let password;
-    if (authPart) {
-      [username, password] = authPart.split(':');
-      if (!username) throw new Error();
-    }
-    return { username, password, hostname, port };
-  } catch {
-    throw new Error('Invalid SOCKS5 address format. Expected [user:pass@]host:port');
-  }
-}
-
-async function socks5Connect(addressType, addressRemote, portRemote, log, parsedSocks5Addr) {
-  const { username, password, hostname, port } = parsedSocks5Addr;
-  const socket = connect({ hostname, port });
-  const writer = socket.writable.getWriter();
-  const reader = socket.readable.getReader();
-  const encoder = new TextEncoder();
-
-  await writer.write(new Uint8Array([5, username && password ? 2 : 1, 0, 2]));
-  let res = (await reader.read()).value;
-  if (!res || res[0] !== 5 || res[1] === 0xff) throw new Error('SOCKS5 greeting rejected.');
-
-  if (res[1] === 2) {
-    if (!username || !password) throw new Error('SOCKS5 credentials missing.');
-    const authReq = new Uint8Array([
-      1, username.length, ...encoder.encode(username),
-      password.length, ...encoder.encode(password),
-    ]);
-    await writer.write(authReq);
-    res = (await reader.read()).value;
-    if (!res || res[1] !== 0x00) throw new Error('SOCKS5 authentication failed.');
-  }
-
-  let DSTADDR;
-  if (addressType === 1) { // IPv4
-    DSTADDR = new Uint8Array([1, ...addressRemote.split('.').map(Number)]);
-  } else if (addressType === 2) { // Domain
-    DSTADDR = new Uint8Array([3, addressRemote.length, ...encoder.encode(addressRemote)]);
-  } else if (addressType === 3) { // IPv6
-    const parts = addressRemote.replace('[', '').replace(']', '').split(':');
-    const bytes = [];
-    for (const part of parts) {
-      const num = parseInt(part || '0', 16);
-      bytes.push(num >> 8, num & 0xff);
-    }
-    DSTADDR = new Uint8Array([4, ...bytes]);
-  } else {
-    throw new Error('Unsupported address type for SOCKS5.');
-  }
-
-  const request = new Uint8Array([5, 1, 0, ...DSTADDR, portRemote >> 8, portRemote & 0xff]);
-  await writer.write(request);
-  res = (await reader.read()).value;
-  if (!res || res[1] !== 0x00) throw new Error(\`SOCKS5 connect failed: code \${res[1]}\`);
-
-  writer.releaseLock();
-  reader.releaseLock();
-  return socket;
-}
-
-
 // --- Subscription and Config Page (From S2) ---
+// This section is already correct.
 
 function generateRandomPath(length = 12, query = '') {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -1069,7 +1053,7 @@ function generateRandomPath(length = 12, query = '') {
   for (let i = 0; i < length; i += 1) {
     result += chars.charAt(Math.floor(Math.random() * chars.length));
   }
-  return \`/\${result}\${query ? \`?\${query}\` : ''}\`;
+  return `/${result}${query ? `?${query}` : ''}`;
 }
 
 const CORE_PRESETS = {
@@ -1084,7 +1068,7 @@ const CORE_PRESETS = {
 };
 
 function makeName(tag, proto) {
-  return \`\${tag}-\${proto.toUpperCase()}\`;
+  return `${tag}-${proto.toUpperCase()}`;
 }
 
 function createVlessLink({ userID, address, port, host, path, security, sni, fp, alpn, extra = {}, name }) {
@@ -1094,7 +1078,7 @@ function createVlessLink({ userID, address, port, host, path, security, sni, fp,
   if (fp) params.set('fp', fp);
   if (alpn) params.set('alpn', alpn);
   for (const [k, v] of Object.entries(extra)) params.set(k, v);
-  return \`vless://\${userID}@\${address}:\${port}?\${params.toString()}#\${encodeURIComponent(name)}\`;
+  return `vless://${userID}@${address}:${port}?${params.toString()}#${encodeURIComponent(name)}`;
 }
 
 function buildLink({ core, proto, userID, hostName, address, port, tag }) {
@@ -1130,7 +1114,7 @@ async function fetchSmartIpPool(env) {
       const ips = [...(json.ipv4 ?? []), ...(json.ipv6 ?? [])].map((item) => item.ip || item).filter(Boolean);
       if (ips.length) return ips;
     } catch (err) {
-      console.warn(\`SMART_IP_SOURCE fetch failed (\${url}):\`, err.message);
+      console.warn(`SMART_IP_SOURCE fetch failed (${url}):`, err.message);
     }
   }
   return [];
@@ -1149,27 +1133,27 @@ async function handleIpSubscription(core, userID, hostName, env) {
   mainDomains.forEach((domain, i) => {
     links.push(buildLink({
       core, proto: 'tls', userID, hostName, address: domain,
-      port: pick(httpsPorts), tag: \`D\${i + 1}\`,
+      port: pick(httpsPorts), tag: `D${i + 1}`,
     }));
     if (!isPagesDeployment) {
       links.push(buildLink({
         core, proto: 'tcp', userID, hostName, address: domain,
-        port: pick(httpPorts), tag: \`D\${i + 1}\`,
+        port: pick(httpPorts), tag: `D${i + 1}`,
       }));
     }
   });
 
   const smartIPs = await fetchSmartIpPool(env);
   smartIPs.slice(0, 40).forEach((ip, index) => {
-    const formatted = ip.includes(':') ? \`[\${ip}]\` : ip;
+    const formatted = ip.includes(':') ? `[${ip}]` : ip;
     links.push(buildLink({
       core, proto: 'tls', userID, hostName, address: formatted,
-      port: pick(httpsPorts), tag: \`IP\${index + 1}\`,
+      port: pick(httpsPorts), tag: `IP${index + 1}`,
     }));
     if (!isPagesDeployment) {
       links.push(buildLink({
         core, proto: 'tcp', userID, hostName, address: formatted,
-        port: pick(httpPorts), tag: \`IP\${index + 1}\`,
+        port: pick(httpPorts), tag: `IP${index + 1}`,
       }));
     }
   });
@@ -1179,9 +1163,6 @@ async function handleIpSubscription(core, userID, hostName, env) {
   });
 }
 
-/**
- * Functional Scamalytics Lookup (from S2, but made secure)
- */
 async function handleScamalyticsLookup(request, cfg) {
     const url = new URL(request.url);
     const ip = url.searchParams.get('ip');
@@ -1198,8 +1179,7 @@ async function handleScamalyticsLookup(request, cfg) {
         });
     }
 
-    // Secure: Uses apiKey from cfg (which is from env secrets), not a hardcoded string
-    const lookupUrl = \`\${baseUrl}?key=\${apiKey}&ip=\${encodeURIComponent(ip)}\`;
+    const lookupUrl = `${baseUrl}?key=${apiKey}&ip=${encodeURIComponent(ip)}`;
     try {
         const res = await fetch(lookupUrl);
         const data = await res.json();
@@ -1217,37 +1197,34 @@ function bytesToReadable(bytes = 0) {
   if (!bytes) return '0 Bytes';
   const units = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
   const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  return \`\${parseFloat((bytes / (1024 ** i)).toFixed(2))} \${units[i]}\`;
+  return `${parseFloat((bytes / (1024 ** i)).toFixed(2))} ${units[i]}`;
 }
 
-/**
- * Renders the beautiful config page from S2
- */
 function handleConfigPage(userID, hostName, cfg, userData) {
   const expDate = userData.expiration_date;
   const expTime = userData.expiration_time;
   const dataUsage = Number(userData.data_usage || 0);
   const dataLimit = Number(userData.data_limit || 0);
 
-  const subXrayUrl = \`https://\${hostName}/xray/\${userID}\`;
-  const subSbUrl = \`https://\${hostName}/sb/\${userID}\`;
+  const subXrayUrl = `https://${hostName}/xray/${userID}`;
+  const subSbUrl = `https://${hostName}/sb/${userID}`;
   const singleXrayConfig = buildLink({
-    core: 'xray', proto: 'tls', userID, hostName, address: hostName, port: 443, tag: \`\${hostName}-Xray\`,
+    core: 'xray', proto: 'tls', userID, hostName, address: hostName, port: 443, tag: `${hostName}-Xray`,
   });
   
   const clientUrls = {
-    universalAndroid: \`v2rayng://install-config?url=\${encodeURIComponent(subXrayUrl)}\`,
-    karing: \`karing://install-config?url=\${encodeURIComponent(subXrayUrl)}\`,
-    shadowrocket: \`shadowrocket://add/sub?url=\${encodeURIComponent(subXrayUrl)}&name=\${encodeURIComponent(hostName)}\`,
-    stash: \`stash://install-config?url=\${encodeURIComponent(subXrayUrl)}\`,
-    streisand: \`streisand://import/\${btoa(subXrayUrl)}\`,
-    clashMeta: \`clash://install-config?url=\${encodeURIComponent(\`https://revil-sub.pages.dev/sub/clash-meta?url=\${subSbUrl}&remote_config=&udp=false&ss_uot=false&show_host=false&forced_ws0rtt=true\`)}\`,
+    universalAndroid: `v2rayng://install-config?url=${encodeURIComponent(subXrayUrl)}`,
+    karing: `karing://install-config?url=${encodeURIComponent(subXrayUrl)}`,
+    shadowrocket: `shadowrocket://add/sub?url=${encodeURIComponent(subXrayUrl)}&name=${encodeURIComponent(hostName)}`,
+    stash: `stash://install-config?url=${encodeURIComponent(subXrayUrl)}`,
+    streisand: `streisand://import/${btoa(subXrayUrl)}`,
+    clashMeta: `clash://install-config?url=${encodeURIComponent(`https://revil-sub.pages.dev/sub/clash-meta?url=${subSbUrl}&remote_config=&udp=false&ss_uot=false&show_host=false&forced_ws0rtt=true`)}`,
   };
-  const utcTimestamp = \`\${expDate}T\${expTime.split('.')[0]}Z\`;
+  const utcTimestamp = `${expDate}T${expTime.split('.')[0]}Z`;
   const hasLimit = dataLimit > 0;
   const pct = hasLimit ? Math.min(100, (dataUsage / dataLimit) * 100) : 0;
 
-  const html = \`<!doctype html>
+  const html = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
@@ -1258,9 +1235,9 @@ function handleConfigPage(userID, hostName, cfg, userData) {
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@300..700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-<style>\${configPageCSS}</style>
+<style>${configPageCSS}</style>
 </head>
-<body data-proxy-ip="\${cfg.proxyAddress}">
+<body data-proxy-ip="${cfg.proxyAddress}">
 <div class="container">
 <header class="header">
 <h1>VLESS Proxy Configuration</h1>
@@ -1297,7 +1274,7 @@ function handleConfigPage(userID, hostName, cfg, userData) {
 <div class="info-card-content">
 <h2 class="info-title">Expiration Date</h2>
 <div id="expiration-relative" class="info-relative-time">Loading…</div>
-<div id="expiration-display" data-utc-time="\${utcTimestamp}" class="info-time-grid">
+<div id="expiration-display" data-utc-time="${utcTimestamp}" class="info-time-grid">
 <div><strong>Your Local Time:</strong><span id="local-time">--</span></div>
 <div><strong>Tehran Time:</strong><span id="tehran-time">--</span></div>
 <div><strong>Universal Time:</strong><span id="utc-time">--</span></div>
@@ -1307,11 +1284,11 @@ function handleConfigPage(userID, hostName, cfg, userData) {
 <div class="info-card">
 <div class="info-card-content">
 <h2 class="info-title">Data Usage</h2>
-<div class="data-usage-text" id="data-usage-display" data-usage="\${dataUsage}" data-limit="\${dataLimit}">
-\${bytesToReadable(dataUsage)} / \${hasLimit ? bytesToReadable(dataLimit) : '&infin;'}
+<div class="data-usage-text" id="data-usage-display" data-usage="${dataUsage}" data-limit="${dataLimit}">
+${bytesToReadable(dataUsage)} / ${hasLimit ? bytesToReadable(dataLimit) : '&infin;'}
 </div>
 <div class="traffic-bar-container">
-<div class="traffic-bar" style="width:\${pct}%"></div>
+<div class="traffic-bar" style="width:${pct}%"></div>
 </div>
 </div>
 </div>
@@ -1321,47 +1298,47 @@ function handleConfigPage(userID, hostName, cfg, userData) {
 <span>Single Xray Config</span>
 </div>
 <div class="config-content">
-<pre id="xray-config">\${singleXrayConfig}</pre>
+<pre id="xray-config">${singleXrayConfig}</pre>
 </div>
 </section>
 <section class="config-card">
 <div class="config-title">
 <span>Xray Subscription</span>
-<button id="copy-xray-sub-btn" class="button copy-btn" data-clipboard-text="\${subXrayUrl}">Copy Link</button>
+<button id="copy-xray-sub-btn" class="button copy-btn" data-clipboard-text="${subXrayUrl}">Copy Link</button>
 </div>
 <div class="client-buttons">
-<a href="\${clientUrls.universalAndroid}" class="client-btn">Universal Import (V2rayNG, etc.)</a>
-<a href="\${clientUrls.karing}" class="client-btn">Import to Karing</a>
-<a href="\${clientUrls.shadowrocket}" class="client-btn">Import to Shadowrocket</a>
-<a href="\${clientUrls.stash}" class="client-btn">Import to Stash</a>
-<a href="\${clientUrls.streisand}" class="client-btn">Import to Streisand</a>
-<button class="client-btn" data-qr-target="xray" data-qr-url="\${subXrayUrl}">Show QR Code</button>
+<a href="${clientUrls.universalAndroid}" class="client-btn">Universal Import (V2rayNG, etc.)</a>
+<a href="${clientUrls.karing}" class="client-btn">Import to Karing</a>
+<a href="${clientUrls.shadowrocket}" class="client-btn">Import to Shadowrocket</a>
+<a href="${clientUrls.stash}" class="client-btn">Import to Stash</a>
+<a href="${clientUrls.streisand}" class="client-btn">Import to Streisand</a>
+<button class="client-btn" data-qr-target="xray" data-qr-url="${subXrayUrl}">Show QR Code</button>
 </div>
 <div id="qr-xray-container" class="qr-container"><div id="qr-xray"></div></div>
 </section>
 <section class="config-card">
 <div class="config-title">
 <span>Sing-Box / Clash Subscription</span>
-<button id="copy-sb-sub-btn" class="button copy-btn" data-clipboard-text="\${subSbUrl}">Copy Link</button>
+<button id="copy-sb-sub-btn" class="button copy-btn" data-clipboard-text="${subSbUrl}">Copy Link</button>
 </div>
 <div class="client-buttons">
-<a href="\${clientUrls.clashMeta}" class="client-btn">Import to Clash Meta / Stash</a>
-<button class="client-btn" data-qr-target="singbox" data-qr-url="\${subSbUrl}">Show QR Code</button>
+<a href="${clientUrls.clashMeta}" class="client-btn">Import to Clash Meta / Stash</a>
+<button class="client-btn" data-qr-target="singbox" data-qr-url="${subSbUrl}">Show QR Code</button>
 </div>
 <div id="qr-singbox-container" class="qr-container"><div id="qr-singbox"></div></div>
 </section>
 <footer class="footer">
-<p>© <span id="current-year">\${new Date().getFullYear()}</span> – All Rights Reserved</p>
+<p>© <span id="current-year">${new Date().getFullYear()}</span> – All Rights Reserved</p>
 <p>Secure · Private · Fast</p>
 </footer>
 </div>
-<script>\${configPageJS}</script>
+<script>${configPageJS}</script>
 </body>
-</html>\`;
+</html>`;
   return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
 }
 
-const configPageCSS = \`
+const configPageCSS = `
 *{margin:0;padding:0;box-sizing:border-box;}
 body{font-family:"Styrene B LC",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#121212;color:#E0E0E0;padding:20px;}
 .container{max-width:900px;margin:0 auto;}
@@ -1408,9 +1385,9 @@ body{font-family:"Styrene B LC",-apple-system,BlinkMacSystemFont,"Segoe UI",sans
   body{padding:12px;}
   .top-grid,.network-grid{grid-template-columns:1fr;}
 }
-\`;
+`;
 
-const configPageJS = \`
+const configPageJS = `
 function copyToClipboard(button, text) {
   const original = button.textContent;
   navigator.clipboard.writeText(text).then(() => {
@@ -1423,8 +1400,8 @@ function copyToClipboard(button, text) {
   }).catch((err) => console.error('Copy failed:', err));
 }
 function toggleQR(containerId, url) {
-  const container = document.getElementById(\`qr-\\\${containerId}-container\`);
-  const target = document.getElementById(\`qr-\\\${containerId}\`);
+  const container = document.getElementById(\`qr-\${containerId}-container\`);
+  const target = document.getElementById(\`qr-\${containerId}\`);
   if (!container || !target) return;
   if (container.style.display === 'block') {
     container.style.display = 'none';
@@ -1444,7 +1421,7 @@ function toggleQR(containerId, url) {
 async function fetchClientPublicIP() {
   try {
     const res = await fetch('https://api.ipify.org?format=json');
-    if (!res.ok) throw new Error(\`HTTP \\\${res.status}\`);
+    if (!res.ok) throw new Error(\`HTTP \${res.status}\`);
     const json = await res.json();
     return json.ip;
   } catch (err) {
@@ -1455,9 +1432,7 @@ async function fetchClientPublicIP() {
 async function fetchScamalyticsInfo(ip) {
   if (!ip) return null;
   try {
-    // This is the functional endpoint
-    // GEMINI FIX: Escaped \${}
-    const res = await fetch(\`/scamalytics-lookup?ip=\\\${encodeURIComponent(ip)}\`);
+    const res = await fetch(\`/scamalytics-lookup?ip=\${encodeURIComponent(ip)}\`);
     if (!res.ok) {
         const errData = await res.json().catch(()=>({}));
         console.error('Scamalytics worker error:', errData.error);
@@ -1472,9 +1447,8 @@ async function fetchScamalyticsInfo(ip) {
 async function fetchIpGeo(ip) {
   if (!ip) return null;
   try {
-    // GEMINI FIX: Escaped \${}
-    const res = await fetch(\`https://ip-api.io/json/\\\${ip}\`);
-    if (!res.ok) throw new Error(\`ip-api.io error \\\${res.status}\`);
+    const res = await fetch(\`https://ip-api.io/json/\${ip}\`);
+    if (!res.ok) throw new Error(\`ip-api.io error \${res.status}\`);
     return res.json();
   } catch (err) {
     console.error('IP geo fetch failed:', err);
@@ -1482,11 +1456,11 @@ async function fetchIpGeo(ip) {
   }
 }
 function populateGeo(prefix, info, fallbackHost) {
-  const hostEl = document.getElementById(\`\\\${prefix}-host\`);
+  const hostEl = document.getElementById(\`\${prefix}-host\`);
   if (hostEl && fallbackHost) hostEl.textContent = fallbackHost;
-  const ipEl = document.getElementById(\`\\\${prefix}-ip\`);
-  const locEl = document.getElementById(\`\\\${prefix}-location\`);
-  const ispEl = document.getElementById(\`\\\${prefix}-isp\`);
+  const ipEl = document.getElementById(\`\${prefix}-ip\`);
+  const locEl = document.getElementById(\`\${prefix}-location\`);
+  const ispEl = document.getElementById(\`\${prefix}-isp\`);
   if (!info) {
     if (ipEl) ipEl.textContent = 'N/A';
     if (locEl) locEl.textContent = 'N/A';
@@ -1498,11 +1472,9 @@ function populateGeo(prefix, info, fallbackHost) {
     const city = info.city || info.ip_city || '';
     const country = info.country || info.ip_country_name || '';
     const code = (info.country_code || info.ip_country_code || '').toLowerCase();
-    // GEMINI FIX: Escaped \${}
-    const flag = code ? \`<img class="country-flag" src="https://flagcdn.com/w20/\\\${code}.png" srcset="https://flagcdn.com/w40/\\\${code}.png 2x" alt="\\\${code.toUpperCase()}">\` : '';
+    const flag = code ? \`<img class="country-flag" src="https://flagcdn.com/w20/\${code}.png" srcset="https://flagcdn.com/w40/\${code}.png 2x" alt="\${code.toUpperCase()}">\` : '';
     const text = [city, country].filter(Boolean).join(', ') || 'N/A';
-    // GEMINI FIX: Escaped \${}
-    locEl.innerHTML = \`\\\${flag}\\\${text}\`;
+    locEl.innerHTML = \`\${flag}\${text}\`;
   }
   if (ispEl) ispEl.textContent = info.isp || info.scamalytics_isp || info.isp_name || 'N/A';
 }
@@ -1529,11 +1501,9 @@ function populateScamalytics(data) {
     const city = data.external_datasources?.dbip?.ip_city || '';
     const country = data.external_datasources?.dbip?.ip_country_name || '';
     const code = (data.external_datasources?.dbip?.ip_country_code || '').toLowerCase();
-    // GEMINI FIX: Escaped \${}
-    const flag = code ? \`<img class="country-flag" src="https://flagcdn.com/w20/\\\${code}.png" srcset="https://flagcdn.com/w40/\\\${code}.png 2x" alt="\\\${code.toUpperCase()}">\` : '';
+    const flag = code ? \`<img class="country-flag" src="https://flagcdn.com/w20/\${code}.png" srcset="https://flagcdn.com/w40/\${code}.png 2x" alt="\${code.toUpperCase()}">\` : '';
     const text = [city, country].filter(Boolean).join(', ') || 'N/A';
-    // GEMINI FIX: Escaped \${}
-    locEl.innerHTML = \`\\\${flag}\\\${text}\`;
+    locEl.innerHTML = \`\${flag}\${text}\`;
   }
   if (ispEl) ispEl.textContent = data.scamalytics?.scamalytics_isp || data.external_datasources?.dbip?.isp_name || 'N/A';
   if (riskEl) {
@@ -1546,8 +1516,7 @@ function populateScamalytics(data) {
       if (risk.toLowerCase() === 'low') badge = 'badge-yes';
       if (risk.toLowerCase() === 'medium') badge = 'badge-warning';
       if (['high', 'very high'].includes(risk.toLowerCase())) badge = 'badge-no';
-      // GEMINI FIX: Escaped \${}
-      riskEl.innerHTML = \`<span class="badge \\\${badge}">\\\${score} – \\\${risk}</span>\`;
+      riskEl.innerHTML = \`<span class="badge \${badge}">\${score} – \${risk}</span>\`;
     }
   }
 }
@@ -1566,8 +1535,7 @@ function updateExpiration() {
   else if (Math.abs(diffSeconds) < 86400) relText = rtf.format(Math.round(diffSeconds / 3600), 'hour');
   else relText = rtf.format(Math.round(diffSeconds / 86400), 'day');
   if (relativeEl) {
-    // GEMINI FIX: Escaped \${}
-    relativeEl.textContent = diffSeconds < 0 ? \`Expired \\\${relText}\` : \`Expires \\\${relText}\`;
+    relativeEl.textContent = diffSeconds < 0 ? \`Expired \${relText}\` : \`Expires \${relText}\`;
     relativeEl.style.color = diffSeconds < 0 ? '#CF6679' : '#03DAC6';
   }
   document.getElementById('local-time').textContent = expiry.toLocaleString();
@@ -1581,8 +1549,7 @@ async function loadNetworkInfo() {
   let proxyHost = proxyAddress.split(':')[0] || proxyAddress;
   if (!/^[0-9a-f:.]+$/.test(proxyHost)) {
     try {
-      // GEMINI FIX: Escaped \${}
-      const dnsRes = await fetch(\`https://dns.google/resolve?name=\\\${encodeURIComponent(proxyHost)}&type=A\`);
+      const dnsRes = await fetch(\`https://dns.google/resolve?name=\${encodeURIComponent(proxyHost)}&type=A\`);
       if (dnsRes.ok) {
         const dns = await dnsRes.json();
         const answer = dns.Answer?.find((a) => a.type === 1);
@@ -1626,42 +1593,45 @@ document.addEventListener('DOMContentLoaded', () => {
   setInterval(updateExpiration, 60 * 1000);
   loadNetworkInfo();
 });
-\`;
+`;
 
 
 // --- Main Fetch Handler (Merged) ---
 export default {
     async fetch(request, env, ctx) {
         const url = new URL(request.url);
-        const cfg = Config.fromEnv(env);
+        const cfg = Config.fromEnv(env); // This now includes S1's socks5.relayMode
 
-        // 1. Admin Panel Routing (From S1)
+        // 1. Admin Panel Routing
         const adminResponse = await handleAdminRequest(request, env);
         if (adminResponse) {
             return adminResponse;
         }
 
-        // 2. Functional Scamalytics lookup (From S2, secured)
+        // 2. Functional Scamalytics lookup
         if (url.pathname === '/scamalytics-lookup') {
             return handleScamalyticsLookup(request, cfg);
         }
 
-        // 3. WebSocket/VLESS Protocol Handling (Merged)
+        // 3. WebSocket/VLESS Protocol Handling
         if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
-             // Create config object for the handler, including SOCKS5 settings
+             // *** FIXED ***
+             // This now passes the S1-style config object that the S1 connection logic expects.
              const requestConfig = {
                 userID: cfg.userID,
                 proxyIP: cfg.proxyIP,
                 proxyPort: cfg.proxyPort,
-                socks5: cfg.socks5,
-                parsedSocks5Address: cfg.socks5.enabled ? socks5AddressParser(cfg.socks5.address) : null,
+                socks5Address: cfg.socks5.address,
+                socks5Relay: cfg.socks5.relayMode,
+                enableSocks: cfg.socks5.enabled,
+                parsedSocks5Address: cfg.socks5.enabled ? socks5AddressParser(cfg.socks5.address) : {},
              };
              return ProtocolOverWSHandler(request, requestConfig, env, ctx);
         }
         
-        // 4. Subscription & Config Page Handling (Using S2's logic)
+        // 4. Subscription & Config Page Handling
         const handleSubscription = async (core) => {
-            const uuid = url.pathname.slice(\`/\${core}/\`.length).split('/')[0];
+            const uuid = url.pathname.slice(`/${core}/`.length).split('/')[0];
             if (!isValidUUID(uuid)) return new Response('Invalid UUID', { status: 400 });
             
             const user = await getUserData(env, uuid);
@@ -1681,11 +1651,10 @@ export default {
             if (!userData || isExpired(userData.expiration_date, userData.expiration_time) || !hasRemainingData(userData)) {
                 return new Response('Invalid or expired user', { status: 403 });
             }
-            // Use S2's beautiful config page handler
             return handleConfigPage(path, url.hostname, cfg, userData);
         }
         
-        // 5. Root Path Reverse Proxy (from S2)
+        // 5. Root Path Reverse Proxy
         if (cfg.rootProxyURL && url.pathname === '/') {
              try {
                 const upstream = new URL(cfg.rootProxyURL);
@@ -1712,12 +1681,12 @@ export default {
                 });
             } catch (err) {
                 console.error('Reverse proxy error:', err);
-                return new Response(\`Proxy upstream error: \${err.message}\`, { status: 502 });
+                return new Response(`Proxy upstream error: ${err.message}`, { status: 502 });
             }
         }
         
         // Fallback for root path
-        return new Response(\`Not Found. Admin panel is at \${cfg.adminPath}\`, { status: 404 });
+        return new Response(`Not Found. Admin panel is at ${cfg.adminPath}`, { status: 404 });
     },
 };
 
@@ -1749,6 +1718,6 @@ function makeReadableWebSocketStream(ws, earlyDataHeader, log) {
             if (error) controller.error(error);
             else if (earlyData) controller.enqueue(earlyData);
         },
-        cancel(reason) { log(\`WebSocket stream canceled: \${reason}\`); safeCloseWebSocket(ws); },
+        cancel(reason) { log(`WebSocket stream canceled: ${reason}`); safeCloseWebSocket(ws); },
     });
 }
