@@ -1,25 +1,87 @@
+# ---------------------------------------------------------------------------
+#  Wrangler Configuration for Ultimate VLESS Proxy Worker (v6.0.0)
+#  This is the complete and optimized configuration file for your script.
+# ---------------------------------------------------------------------------
+
+# Your project's name in the Cloudflare dashboard
 name = "spring"
+
+# Your main script file
+# This assumes you save the script in a `src` folder as `worker.js`.
+# If your file or folder name is different, change this path.
 main = "_worker.js"
-compatibility_date = "2025-05-19"
-workers_dev = true
-# logpush job is setup to capture from envs ending: log, pro, or one
-logpush = false
-# use node_compat or custom build
-# node_compat = true
-send_metrics = false
-minify = false
 
-[vars]
-# UUID = "d342d11e-d424-4583-b36e-524ab1f0afa4"
+# Script format (based on `export default`)
+format = "modules"
+
+# Compatibility Date
+# Using a recent date enables modern features like `cloudflare:sockets`
+compatibility_date = "2025-10-20"
+
+# ---------------------------------------------------------------------------
+#  Network Capabilities
+# ---------------------------------------------------------------------------
+# ⚠️ Critically Important: Your script uses `import { connect } from 'cloudflare:sockets'`
+# to make outbound TCP connections.
+# This line is *mandatory* to allow the worker to establish these connections.
+outbound = ["tcp:*"]
+
+# ---------------------------------------------------------------------------
+#  D1 Database Binding
+# ---------------------------------------------------------------------------
+# Your script requires a D1 database with the binding `DB` for user management.
+#
+# 1. To create the database, run this command in your terminal:
+#    wrangler d1 create vless-users-db
+#
+# 2. Copy the `database_id` from the output of the command above and paste it below.
+[[d1_databases]]
+binding = "DB"                  # The name the script expects (env.DB)
+database_name = "vless-users-db" # Your database name
+database_id = "<YOUR_D1_DATABASE_ID_HERE>" # ⚠️ Replace this with your Database ID
+
+# ---------------------------------------------------------------------------
+#  KV Namespace Binding
+# ---------------------------------------------------------------------------
+# Your script requires a KV namespace for caching user data and admin sessions.
+#
+# 1. To create the KV namespace, run this command in your terminal:
+#    wrangler kv:namespace create USER_KV
+#
+# 2. Copy the `id` and `preview_id` from the output and paste them in the lines below.
+[[kv_namespaces]]
+binding = "USER_KV"             # The name the script expects (env.USER_KV)
+id = "<YOUR_KV_NAMESPACE_ID_HERE>" # ⚠️ Replace this with the primary ID
+preview_id = "<YOUR_KV_PREVIEW_ID_HERE>" # ⚠️ Replace this with the preview ID
+
+# ---------------------------------------------------------------------------
+#  Environment Variables & Secrets
+# ---------------------------------------------------------------------------
+# ⚠️ CRITICAL SECURITY WARNING:
+# Sensitive values like `ADMIN_KEY` and `PROXYIP` should *never* be written directly
+# in this file. They must be set as "Secrets" in the Cloudflare environment.
+#
+# To set secrets, use the Cloudflare dashboard (Settings -> Variables -> Encrypted)
+# or the `wrangler secret put` commands in your terminal.
+#
+# Example for setting the mandatory secrets:
+# wrangler secret put ADMIN_KEY
+# (You will be prompted to enter your strong password)
+#
+# wrangler secret put PROXYIP
+# (You will be prompted to enter the clean IP/domain, e.g., sub.yourdomain.com)
+#
+# [vars]
+# We leave this section empty to encourage the use of Secrets.
+# If you only need this for local testing, you can place values here:
+#
+# [vars]
+# ADMIN_KEY = "d96535a290c322b55f4a1db4a3e86b1a6f56d6f528b80a0d5b35910e6c97787c"
 # PROXYIP = "nima.nscl.ir"
-# DNS_RESOLVER_URL = "https://1.1.1.1/dns-query"
-# NODE_ID = "1"
-# API_TOKEN = "example_dev_token"
-# API_HOST = "SUBAPI.cmliussss.net"
-
-# [build]
-# command = "npm run build"
-
-# [[rules]]
-# type = "ESModule"
-# globs = ["**/*.js"]
+# # --- Optional variables for local testing ---
+# # ADMIN_PATH = "/ysdfg"
+# # UUID = "d342d11e-d424-4583-b36e-524ab1f0afa4"
+# # SCAMALYTICS_API_KEY = "YOUR_API_KEY"
+# # SOCKS5 = "user:pass@host:port"
+# # SOCKS5_RELAY = "false"
+# # ROOT_PROXY_URL = "https://speed.cloudflare.com"
