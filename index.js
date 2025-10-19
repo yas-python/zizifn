@@ -9,11 +9,11 @@
  *
  * CORRECTION HIGHLIGHT:
  * - Fixed the critical bug in the main fetch handler that incorrectly validated the WebSocket path.
- *   The original logic checked for a UUID in the connection path, causing all connections using
- *   the generated random-path configs to fail.
+ * The original logic checked for a UUID in the connection path, causing all connections using
+ * the generated random-path configs to fail.
  * - The corrected logic now properly accepts any WebSocket upgrade and defers UUID authentication
- *   to the VLESS protocol handler (`ProtocolOverWSHandler`), which reads the UUID from the
- *   initial data packet. This aligns with the VLESS standard and fixes the connectivity issue.
+ * to the VLESS protocol handler (`ProtocolOverWSHandler`), which reads the UUID from the
+ * initial data packet. This aligns with the VLESS standard and fixes the connectivity issue.
  *
  * All features are preserved and now fully functional:
  * - Full Admin Panel with user CRUD, data limits, and IP limits.
@@ -24,7 +24,7 @@
  * Setup Instructions:
  * 1. Create a D1 Database and bind it as `DB`.
  * 2. Run DB initialization command in your terminal:
- *    `wrangler d1 execute DB --command="CREATE TABLE IF NOT EXISTS users (uuid TEXT PRIMARY KEY, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, expiration_date TEXT NOT NULL, expiration_time TEXT NOT NULL, notes TEXT, data_limit INTEGER DEFAULT 0, data_usage INTEGER DEFAULT 0, ip_limit INTEGER DEFAULT 2);"`
+ * `wrangler d1 execute DB --command="CREATE TABLE IF NOT EXISTS users (uuid TEXT PRIMARY KEY, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, expiration_date TEXT NOT NULL, expiration_time TEXT NOT NULL, notes TEXT, data_limit INTEGER DEFAULT 0, data_usage INTEGER DEFAULT 0, ip_limit INTEGER DEFAULT 2);"`
  * 3. Create a KV Namespace and bind it as `USER_KV`.
  * 4. Set Secrets in your Worker's settings:
  * - `ADMIN_KEY`: Your password for the admin panel.
@@ -1319,8 +1319,7 @@ async function handleIpSubscription(core, userID, hostName, env) {
     }
   });
 
-  return new Response(btoa(links.join('
-')), {
+  return new Response(btoa(links.join('\n')), {
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
   });
 }
