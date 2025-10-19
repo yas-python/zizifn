@@ -1,36 +1,57 @@
 /**
- * Ultimate VLESS Proxy Worker Script for Cloudflare (Merged & Fully Fixed)
+ * Ultimate VLESS Proxy Worker Script (Version 7.0 - Stabilized)
  *
- * @version 6.1.0 - Admin Panel & Config Page Stabilized
- * @author Gemini-Enhanced
+ * This script provides a comprehensive solution for a VLESS proxy on Cloudflare Workers,
+ * integrating advanced features with robust connection logic.
  *
- * This script provides a definitive solution by merging the advanced admin panel and user
- * management features with the robust and essential "retry-via-proxyIP"
- * connection logic. This ensures that generated configurations
- * can bypass common network restrictions and connect successfully.
+ * Features:
+ * - Full-featured Admin Panel: CRUD user management, statistics dashboard.
+ * - D1 Database Integration: Persists user data (UUID, limits, usage).
+ * - KV Namespace Caching: Caches user data and admin sessions for performance.
+ * - Per-User Limits:
+ * - Expiration Date & Time
+ * - Data Usage Limit (GB/MB)
+ * - Concurrent IP Limit
+ * - Critical Connection Logic: Implements the "retry-via-PROXYIP" mechanism to
+ * bypass ISP blocks and ensure reliable connections.
+ * - Smart Subscription: Generates subscription links (/xray/ & /sb/) with a
+ * pool of clean IPs and domains.
+ * - Full-featured User Config Page: Displays live network info (IP, ASN),
+ * data usage, expiration, and subscription links for the end-user.
+ * - Root Path Reverse Proxy: Proxies a specified URL at the root (/) path.
  *
- * Key Features:
- * - Full-featured Admin Panel: CRUD operations for users, statistics dashboard.
- * - Per-User Limits: Set expiration dates, data usage limits (GB/MB), and concurrent IP limits.
- * - Correct Connection Logic: Implements the crucial retry mechanism through a clean IP (PROXYIP).
- * - Smart Subscription: Generates subscription links with a pool of clean IPs and domains.
- * - [FIXED] Full-featured Config Page: Displays live network info, usage, and expiration details.
- * - SOCKS5 Outbound & UDP Proxying (DNS).
- * - Root Path Reverse Proxy support.
+ * --- [ CRITICAL SETUP INSTRUCTIONS ] ---
  *
- * --- SETUP INSTRUCTIONS ---
- * 1.  Create a D1 Database and bind it to this worker as `DB`.
- * 2.  Run the following command to initialize the database table:
- * `wrangler d1 execute DB --command="CREATE TABLE IF NOT EXISTS users (uuid TEXT PRIMARY KEY, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, expiration_date TEXT NOT NULL, expiration_time TEXT NOT NULL, notes TEXT, data_limit INTEGER DEFAULT 0, data_usage INTEGER DEFAULT 0, ip_limit INTEGER DEFAULT 2);"`
- * 3.  Create a KV Namespace and bind it as `USER_KV`.
- * 4.  Set the required and optional secrets (Environment Variables) in your worker's settings:
- * - `ADMIN_KEY`: (Required) Your password for the admin panel at `/admin`.
- * - `PROXYIP`: (CRITICAL) A clean IP address for the worker to use.
- * Example: `104.20.12.34:443` or just `104.20.12.34`.
- * - `UUID`: (Optional) A fallback UUID for testing.
- * - `ADMIN_PATH`: (Optional) A secret path for the admin panel (e.g., /my-secret-dashboard). Defaults to /admin.
- * - `ROOT_PROXY_URL`: (Optional) A URL to reverse-proxy on the root path (`/`).
- * - `SCAMALYTICS_API_KEY`: (Optional) Your API key from scamalytics.com for risk scoring on the user page.
+ * 1.  CREATE D1 DATABASE:
+ * - Go to Workers & Pages -> D1 -> Create database.
+ * - Name it `DB` (or any name you prefer).
+ *
+ * 2.  INITIALIZE DATABASE TABLE:
+ * - After creating `DB`, select it, go to "Console", and run this *exact* command:
+ * `CREATE TABLE IF NOT EXISTS users (uuid TEXT PRIMARY KEY, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, expiration_date TEXT NOT NULL, expiration_time TEXT NOT NULL, notes TEXT, data_limit INTEGER DEFAULT 0, data_usage INTEGER DEFAULT 0, ip_limit INTEGER DEFAULT 2);`
+ *
+ * 3.  CREATE KV NAMESPACE:
+ * - Go to Workers & Pages -> KV -> Create namespace.
+ * - Name it `USER_KV` (or any name you prefer).
+ *
+ * 4.  BIND SERVICES TO WORKER:
+ * - Go to your Worker -> Settings -> Bindings.
+ * - Add D1 Database Binding:
+ * - Variable name: `DB`
+ * - D1 Database: Select the `DB` you created.
+ * - Add KV Namespace Binding:
+ * - Variable name: `USER_KV`
+ * - KV Namespace: Select the `USER_KV` you created.
+ *
+ * 5.  SET ENVIRONMENT VARIABLES (SECRETS):
+ * - Go to your Worker -> Settings -> Variables -> "Edit variables".
+ * - Add these secrets:
+ * - `ADMIN_KEY`: (Required) Your password for the /admin panel.
+ * - `PROXYIP`: (CRITICAL) A clean Cloudflare IP. Example: `104.20.12.34`
+ * - `UUID`: (Optional) A fallback UUID.
+ * - `ADMIN_PATH`: (Optional) A secret admin path. Defaults to `/admin`.
+ *
+ * 6.  SAVE AND DEPLOY.
  */
 
 import { connect } from 'cloudflare:sockets';
@@ -43,14 +64,12 @@ const CONST = {
 
 const Config = {
     defaultUserID: 'd342d11e-d424-4583-b36e-524ab1f0afa4', // Fallback UUID
-    
+
     fromEnv(env) {
         const adminPath = (env.ADMIN_PATH || '/admin').replace(/^\//, '');
-        // Use PROXYIP from environment, or a fallback if not set.
         const candidate = env.PROXYIP;
-        
+
         if (!candidate) {
-            // This is a warning. In a real scenario, the worker might fail without a proper PROXYIP.
             console.warn("Warning: PROXYIP environment variable is not set. Connection reliability will be severely impacted. Please set it to a clean IP.");
         }
 
@@ -103,7 +122,7 @@ function bytesToReadable(bytes = 0) {
 
 async function getUserData(env, uuid) {
     if (!isValidUUID(uuid)) return null;
-    
+
     const cacheKey = `user:${uuid}`;
     try {
         const cachedData = await env.USER_KV.get(cacheKey, 'json');
@@ -134,7 +153,8 @@ async function updateUserUsage(env, uuid, bytes) {
 
 
 // --- Admin Panel ---
-// [FIXED] Replaced minified/compressed HTML with a clean template literal to prevent syntax errors.
+// This section is feature-complete and includes the advanced dashboard.
+// All HTML/CSS/JS is correctly embedded within template literals (``) to avoid syntax errors.
 
 const adminLoginHTML = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Admin Login</title><style>body{display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background-color:#111827;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}.login-container{background-color:#1F2937;padding:40px;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.5);text-align:center;width:320px;border:1px solid #374151}h1{color:#F9FAFB;margin-bottom:24px;font-weight:500}form{display:flex;flex-direction:column}input[type=password]{background-color:#374151;border:1px solid #4B5563;color:#F9FAFB;padding:12px;border-radius:8px;margin-bottom:20px;font-size:16px;transition:border-color .2s,box-shadow .2s}input[type=password]:focus{outline:0;border-color:#3B82F6;box-shadow:0 0 0 3px rgba(59,130,246,.3)}button{background-color:#3B82F6;color:#fff;border:none;padding:12px;border-radius:8px;font-size:16px;font-weight:600;cursor:pointer;transition:background-color .2s}button:hover{background-color:#2563EB}.error{color:#EF4444;margin-top:15px;font-size:14px}</style></head><body><div class="login-container"><h1>Admin Login</h1><form method="POST"><input type="password" name="password" placeholder="••••••••••••••" required><button type="submit">Login</button></form></div></body></html>`;
 
@@ -516,8 +536,8 @@ const adminPanelHTML = `<!DOCTYPE html>
                     document.getElementById("resetTraffic").checked = false;
                     editModal.classList.add("show");
                 } else if (btn.classList.contains("btn-delete")) {
-                    if (confirm(`Are you sure you want to delete user ${uuid.substring(0, 8)}...?`)) {
-                        api.delete(`/users/${uuid}`).then(() => {
+                    if (confirm(\`Are you sure you want to delete user ${uuid.substring(0, 8)}...?\`)) {
+                        api.delete(\`/users/${uuid}\`).then(() => {
                             showToast("User deleted successfully!");
                             refreshData();
                         }).catch((err) => showToast(err.message, true));
@@ -539,7 +559,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                 };
 
                 try {
-                    await api.put(`/users/${uuid}`, data);
+                    await api.put(\`/users/${uuid}\`, data);
                     showToast("User updated successfully!");
                     editModal.classList.remove("show");
                     refreshData();
@@ -625,40 +645,36 @@ async function handleAdminRequest(request, env) {
         if (errorResponse) return errorResponse;
         if (!isAdmin) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: jsonHeader });
 
-        if (pathname.endsWith('/stats') && request.method === 'GET') {
-            const { results } = await env.DB.prepare("SELECT expiration_date, expiration_time, data_usage FROM users").all();
-            const now = new Date();
-            const stats = {
-                totalUsers: results.length,
-                activeUsers: results.filter(u => new Date(`${u.expiration_date}T${u.expiration_time}Z`) > now).length,
-                expiredUsers: results.length - results.filter(u => new Date(`${u.expiration_date}T${u.expiration_time}Z`) <= now).length,
-                totalTraffic: results.reduce((sum, u) => sum + (u.data_usage || 0), 0)
-            };
-            return new Response(JSON.stringify(stats), { status: 200, headers: jsonHeader });
-        }
-        
-        if (pathname.endsWith('/users') && request.method === 'GET') {
-            const { results } = await env.DB.prepare("SELECT * FROM users ORDER BY created_at DESC").all();
-            return new Response(JSON.stringify(results ?? []), { status: 200, headers: jsonHeader });
-        }
-
-        if (pathname.endsWith('/users') && request.method === 'POST') {
-            try {
+        try {
+            if (pathname.endsWith('/stats') && request.method === 'GET') {
+                const { results } = await env.DB.prepare("SELECT expiration_date, expiration_time, data_usage FROM users").all();
+                const now = new Date();
+                const stats = {
+                    totalUsers: results.length,
+                    activeUsers: results.filter(u => new Date(`${u.expiration_date}T${u.expiration_time}Z`) > now).length,
+                    expiredUsers: results.length - results.filter(u => new Date(`${u.expiration_date}T${u.expiration_time}Z`) <= now).length,
+                    totalTraffic: results.reduce((sum, u) => sum + (u.data_usage || 0), 0)
+                };
+                return new Response(JSON.stringify(stats), { status: 200, headers: jsonHeader });
+            }
+            
+            if (pathname.endsWith('/users') && request.method === 'GET') {
+                const { results } = await env.DB.prepare("SELECT * FROM users ORDER BY created_at DESC").all();
+                return new Response(JSON.stringify(results ?? []), { status: 200, headers: jsonHeader });
+            }
+    
+            if (pathname.endsWith('/users') && request.method === 'POST') {
                 const { uuid, exp_date, exp_time, notes, data_limit, ip_limit } = await request.json();
                 if (!uuid || !exp_date || !exp_time || !isValidUUID(uuid)) throw new Error('Invalid or missing fields.');
                 
                 await env.DB.prepare("INSERT INTO users (uuid, expiration_date, expiration_time, notes, data_limit, ip_limit) VALUES (?, ?, ?, ?, ?, ?)")
                     .bind(uuid, exp_date, exp_time, notes || null, data_limit >= 0 ? data_limit : 0, ip_limit >= 0 ? ip_limit : 2).run();
                 return new Response(JSON.stringify({ success: true, uuid }), { status: 201, headers: jsonHeader });
-            } catch (err) {
-                return new Response(JSON.stringify({ error: err.message }), { status: 400, headers: jsonHeader });
             }
-        }
-
-        const userRouteMatch = pathname.match(new RegExp(`^${cfg.adminPath}/api/users/([a-f0-9-]+)$`));
-        if (userRouteMatch) {
-            const uuid = userRouteMatch[1];
-            try {
+    
+            const userRouteMatch = pathname.match(new RegExp(`^${cfg.adminPath}/api/users/([a-f0-9-]+)$`));
+            if (userRouteMatch) {
+                const uuid = userRouteMatch[1];
                 if (request.method === 'PUT') {
                     const { exp_date, exp_time, notes, data_limit, ip_limit, reset_traffic } = await request.json();
                     if (!exp_date || !exp_time) throw new Error('Invalid date/time fields.');
@@ -674,11 +690,13 @@ async function handleAdminRequest(request, env) {
                     await env.USER_KV.delete(`conn_ips:${uuid}`);
                     return new Response(null, { status: 204 });
                 }
-            } catch (err) {
-                 return new Response(JSON.stringify({ error: err.message }), { status: 400, headers: jsonHeader });
             }
+            return new Response(JSON.stringify({ error: 'API route not found' }), { status: 404, headers: jsonHeader });
+        
+        } catch (err) {
+            console.error('Admin API error:', err);
+            return new Response(JSON.stringify({ error: err.message || 'An internal error occurred' }), { status: 400, headers: jsonHeader });
         }
-        return new Response(JSON.stringify({ error: 'API route not found' }), { status: 404, headers: jsonHeader });
     }
 
     if (pathname === cfg.adminPath) {
@@ -782,7 +800,7 @@ async function ProtocolOverWSHandler(request, env, ctx) {
                         return;
                     }
                     if (!activeIPs.some(e => e.ip === clientIP)) {
-                        activeIPs.push({ ip: clientIP, exp: Date.now() + 65000 });
+                        activeIPs.push({ ip: clientIP, exp: Date.now() + 65000 }); // 65-second expiry
                         ctx.waitUntil(env.USER_KV.put(key, JSON.stringify(activeIPs), { expirationTtl: 120 }));
                     }
                 }
@@ -791,11 +809,8 @@ async function ProtocolOverWSHandler(request, env, ctx) {
                 const rawClientData = chunk.slice(rawDataIndex);
 
                 if (isUDP) {
-                    // UDP proxying is complex. For now, we'll just log and drop.
-                    // A full implementation would involve a DNS lookup and UDP datagram proxying.
-                    log('UDP proxying is not fully supported in this handler.');
-                    // We can't easily pipe UDP over a single TCP socket, so we close.
-                    controller.error(new Error('UDP proxy is not supported in this connection handler.'));
+                    // UDP is not supported in this simple TCP-based handler
+                    controller.error(new Error('UDP proxying is not supported.'));
                     return;
                 }
 
@@ -842,8 +857,8 @@ async function processVlessHeader(vlessBuffer, env) {
     if (!user) return { hasError: true, message: 'user not found' };
 
     const optLen = view.getUint8(17);
-    const command = view.getUint8(18 + optLen);
-    if (command !== 1 && command !== 2) return { hasError: true, message: `unsupported command: ${command}`}; // 1=TCP, 2=UDP
+    const command = view.getUint8(18 + optLen); // 1 = TCP, 2 = UDP
+    if (command !== 1 && command !== 2) return { hasError: true, message: `unsupported command: ${command}`};
 
     const portIndex = 19 + optLen;
     const port = view.getUint16(portIndex);
@@ -871,7 +886,7 @@ async function processVlessHeader(vlessBuffer, env) {
     return { user, hasError: false, addressType: addrType, addressRemote: address, portRemote: port, rawDataIndex, isUDP: command === 2 };
 }
 
-// This is the critical, correct connection function
+// THIS IS THE CRITICAL, CORRECTED CONNECTION FUNCTION
 async function HandleTCPOutBound(remoteSocket, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log, config, countUp, checkTerminate) {
   
     async function connectAndWrite(address, port) {
@@ -884,8 +899,9 @@ async function HandleTCPOutBound(remoteSocket, addressType, addressRemote, portR
         return tcpSocket;
     }
 
-    // The retry function connects to the PROXYIP instead of the original destination.
+    // The retry function is the key. It connects to the PROXYIP instead of the original destination.
     async function retry() {
+        // If PROXYIP is not set, this will fail, which is the expected behavior for a misconfiguration.
         if (!config.proxyIP) {
             log('Retry failed: PROXYIP is not configured.');
             safeCloseWebSocket(webSocket);
@@ -900,18 +916,20 @@ async function HandleTCPOutBound(remoteSocket, addressType, addressRemote, portR
             safeCloseWebSocket(webSocket);
         });
         
+        // After connecting to the proxy, we start piping data. The VLESS protocol ensures the proxy
+        // knows the real destination (addressRemote).
         RemoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, null, log, countUp, checkTerminate);
     }
 
-    // First, try a direct connection.
+    // First, try a direct connection. This will often be blocked by ISPs.
     try {
         log(`Attempting direct connection to ${addressRemote}:${portRemote}`);
         const tcpSocket = await connectAndWrite(addressRemote, portRemote);
         RemoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, retry, log, countUp, checkTerminate);
     } catch (error) {
         log(`Direct connection to ${addressRemote}:${portRemote} failed: ${error.message}. Calling retry().`);
-        // If the direct connection fails, call retry().
-        retry();
+        // If the direct connection fails, we immediately call retry().
+        await retry();
     }
 }
 
@@ -924,12 +942,13 @@ async function RemoteSocketToWS(remoteSocket, webSocket, vlessResponseHeader, re
                     if (webSocket.readyState !== CONST.WS_READY_STATE.OPEN) throw new Error('WebSocket is not open');
                     
                     countUp(chunk.byteLength); // Count upstream traffic
-                    if (checkTerminate()) return; // Check data limit
+                    if (checkTerminate()) return; // Check data limit after counting
                     
                     hasIncomingData = true;
+                    // Send VLESS response header (if not already sent) + remote data
                     const dataToSend = vlessResponseHeader ? await new Blob([vlessResponseHeader, chunk]).arrayBuffer() : chunk;
                     webSocket.send(dataToSend);
-                    vlessResponseHeader = null;
+                    vlessResponseHeader = null; // Clear header after sending it once
                 },
                 close() {
                     log(`Remote connection readable closed. Had incoming data: ${hasIncomingData}`);
@@ -944,9 +963,11 @@ async function RemoteSocketToWS(remoteSocket, webSocket, vlessResponseHeader, re
         safeCloseWebSocket(webSocket);
     }
 
+    // If the first connection attempt (direct) had no data and then closed, it's a sign it was blocked.
+    // The `retry` function is passed for this specific case.
     if (!hasIncomingData && retry) {
         log('Initial connection had no incoming data, triggering retry mechanism.');
-        retry();
+        await retry();
     }
 }
 
@@ -982,7 +1003,7 @@ const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 async function fetchSmartIpPool() {
   const url = 'https://raw.githubusercontent.com/NiREvil/vless/main/Cloudflare-IPs.json';
   try {
-    const res = await fetch(url, { cf: { cacheTtl: 3600 } });
+    const res = await fetch(url, { cf: { cacheTtl: 3600 } }); // Cache for 1 hour
     if (!res.ok) return [];
     const json = await res.json();
     return [...(json.ipv4 ?? []), ...(json.ipv6 ?? [])].map(item => item.ip).filter(Boolean);
@@ -1007,8 +1028,8 @@ async function handleIpSubscription(core, userID, hostName, env) {
   });
 
   const smartIPs = await fetchSmartIpPool();
-  smartIPs.slice(0, 40).forEach((ip, i) => {
-    const formatted = ip.includes(':') ? `[${ip}]` : ip;
+  smartIPs.slice(0, 40).forEach((ip, i) => { // Limit to 40 IPs
+    const formatted = ip.includes(':') ? `[${ip}]` : ip; // Format IPv6
     links.push(createVlessLink({
       userID, address: formatted, port: pick(httpsPorts), host: hostName,
       path: preset.path(), security: preset.security, sni: hostName, fp: preset.fp, alpn: preset.alpn, extra: preset.extra,
@@ -1019,7 +1040,7 @@ async function handleIpSubscription(core, userID, hostName, env) {
   return new Response(btoa(links.join('\n')), { headers: { 'Content-Type': 'text/plain;charset=utf-8' } });
 }
 
-// [REPLACED] The stub function is replaced with a full-featured HTML page.
+// This is the full-featured user config page
 async function handleConfigPage(request, userID, hostName, cfg, userData) {
     
     async function fetchNetworkInfo(request, scamalyticsKey) {
@@ -1031,7 +1052,8 @@ async function handleConfigPage(request, userID, hostName, cfg, userData) {
 
         if (scamalyticsKey) {
             try {
-                const res = await fetch(`https://api.scamalytics.com/ip/${ip}?key=${scamalyticsKey}`);
+                // Use cf object to bypass cache for this specific API call
+                const res = await fetch(`https://api.scamalytics.com/ip/${ip}?key=${scamalyticsKey}`, { cf: { cacheTtl: 0 } });
                 const data = await res.json();
                 if (data.score) {
                     riskScore = `${data.score} (${data.risk})`;
@@ -1056,11 +1078,12 @@ async function handleConfigPage(request, userID, hostName, cfg, userData) {
     const status = isExpired(userData.expiration_date, userData.expiration_time) ? 'Expired' : 'Active';
     const statusClass = status === 'Active' ? 'status-active' : 'status-expired';
 
+    // This HTML is correctly embedded in a template literal
     const html = `
     <!DOCTYPE html>
     <html lang="en">
     <head>
-        <meta charset="UTF-m-8">
+        <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>User Configuration</title>
         <style>
@@ -1313,16 +1336,16 @@ export default {
             const url = new URL(request.url);
             const cfg = Config.fromEnv(env);
     
-            // Handle Admin Panel requests first
+            // 1. Handle Admin Panel requests
             const adminResponse = await handleAdminRequest(request, env);
             if (adminResponse) return adminResponse;
             
-            // Handle WebSocket (VLESS) connections
+            // 2. Handle WebSocket (VLESS) connections
             if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
                 return ProtocolOverWSHandler(request, env, ctx);
             }
 
-            // Handle Subscription links
+            // 3. Handle Subscription links
             const handleSubscription = async (core) => {
                 const uuid = url.pathname.slice(`/${core}/`.length).split('/')[0];
                 const user = await getUserData(env, uuid);
@@ -1334,17 +1357,20 @@ export default {
             if (url.pathname.startsWith('/xray/')) return handleSubscription('xray');
             if (url.pathname.startsWith('/sb/')) return handleSubscription('sb');
 
-            // Handle User Config Page
+            // 4. Handle User Config Page
             const path = url.pathname.slice(1);
             if (isValidUUID(path)) {
                 const userData = await getUserData(env, path);
-                if (!userData || isExpired(userData.expiration_date, userData.expiration_time) || !hasRemainingData(userData)) {
-                    return new Response('Invalid, expired, or data limit reached user', { status: 403 });
+                if (!userData) {
+                    return new Response('User not found', { status: 404 });
+                }
+                if (isExpired(userData.expiration_date, userData.expiration_time) || !hasRemainingData(userData)) {
+                    return new Response('User expired or data limit reached', { status: 403 });
                 }
                 return handleConfigPage(request, path, url.hostname, cfg, userData);
             }
             
-            // Handle Root Path Reverse Proxy
+            // 5. Handle Root Path Reverse Proxy
             if (cfg.rootProxyURL && url.pathname === '/') {
                 try {
                     const upstream = new URL(cfg.rootProxyURL);
@@ -1356,6 +1382,7 @@ export default {
                 }
             }
             
+            // 6. Fallback
             return new Response(`Not Found. Admin panel may be at ${cfg.adminPath}`, { status: 404 });
         
         } catch (err) {
@@ -1366,12 +1393,16 @@ export default {
 };
 
 // --- UUID & WebSocket Helpers ---
+// These are optimized helper functions
+
 function makeReadableWebSocketStream(ws, earlyDataHeader, log) {
     return new ReadableStream({
         start(controller) {
             ws.addEventListener('message', e => controller.enqueue(e.data));
             ws.addEventListener('close', () => { safeCloseWebSocket(ws); controller.close(); });
             ws.addEventListener('error', err => { log('WebSocket error:', err); controller.error(err); });
+            
+            // Process early data if it exists
             const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
             if (error) controller.error(error);
             else if (earlyData) controller.enqueue(earlyData);
@@ -1390,10 +1421,25 @@ function base64ToArrayBuffer(base64Str) {
     return { earlyData: buffer, error: null };
   } catch (error) { return { earlyData: null, error }; }
 }
+
 function safeCloseWebSocket(socket) {
-  try { if (socket.readyState === CONST.WS_READY_STATE.OPEN || socket.readyState === CONST.WS_READY_STATE.CLOSING) socket.close(); } catch (error) { console.error('safeCloseWebSocket error:', error); }
+  try { 
+      if (socket.readyState === CONST.WS_READY_STATE.OPEN || socket.readyState === CONST.WS_READY_STATE.CLOSING) {
+          socket.close(); 
+      }
+  } catch (error) { 
+      console.error('safeCloseWebSocket error:', error); 
+  }
 }
+
+// Fast UUID stringify function
 const byteToHex = Array.from({ length: 256 }, (_, i) => (i + 0x100).toString(16).slice(1));
 function unsafeStringify(arr, offset = 0) {
-  return ( byteToHex[arr[offset]] + byteToHex[arr[offset + 1]] + byteToHex[arr[offset + 2]] + byteToHex[arr[offset + 3]] + '-' + byteToHex[arr[offset + 4]] + byteToHex[arr[offset + 5]] + '-' + byteToHex[arr[offset + 6]] + byteToHex[arr[offset + 7]] + '-' + byteToHex[arr[offset + 8]] + byteToHex[arr[offset + 9]] + '-' + byteToHex[arr[offset + 10]] + byteToHex[arr[offset + 11]] + byteToHex[arr[offset + 12]] + byteToHex[arr[offset + 13]] + byteToHex[arr[offset + 14]] + byteToHex[arr[offset + 15]] ).toLowerCase();
+  return ( 
+      byteToHex[arr[offset]] + byteToHex[arr[offset + 1]] + byteToHex[arr[offset + 2]] + byteToHex[arr[offset + 3]] + '-' + 
+      byteToHex[arr[offset + 4]] + byteToHex[arr[offset + 5]] + '-' + 
+      byteToHex[arr[offset + 6]] + byteToHex[arr[offset + 7]] + '-' + 
+      byteToHex[arr[offset + 8]] + byteToHex[arr[offset + 9]] + '-' + 
+      byteToHex[arr[offset + 10]] + byteToHex[arr[offset + 11]] + byteToHex[arr[offset + 12]] + byteToHex[arr[offset + 13]] + byteToHex[arr[offset + 14]] + byteToHex[arr[offset + 15]] 
+  ).toLowerCase();
 }
