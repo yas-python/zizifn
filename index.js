@@ -419,12 +419,12 @@ const adminPanelHTML = `<!DOCTYPE html>
             }
 
             function renderStats(stats) {
-                document.getElementById("stats").innerHTML = \`
+                document.getElementById("stats").innerHTML = `
                     <div class="stat-card"><h3 class="stat-title">Total Users</h3><p class="stat-value">${stats.totalUsers}</p></div>
                     <div class="stat-card"><h3 class="stat-title">Active Users</h3><p class="stat-value">${stats.activeUsers}</p></div>
                     <div class="stat-card"><h3 class="stat-title">Expired Users</h3><p class="stat-value">${stats.expiredUsers}</p></div>
                     <div class="stat-card"><h3 class="stat-title">Total Traffic</h3><p class="stat-value">${bytesToReadable(stats.totalTraffic)}</p></div>
-                \`;
+                `;
             }
 
             function renderUsers(users) {
@@ -438,7 +438,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                         const isExpired = expiry < new Date();
                         const traffic = user.data_limit > 0 ? `${bytesToReadable(user.data_usage)} / ${bytesToReadable(user.data_limit)}` : `${bytesToReadable(user.data_usage)} / &infin;`;
                         const trafficPercent = user.data_limit > 0 ? Math.min(100, (user.data_usage / user.data_limit) * 100) : 0;
-                        return \`
+                        return `
                             <tr data-uuid="${user.uuid}">
                                 <td title="${user.uuid}">${user.uuid.substring(0, 8)}...</td>
                                 <td>${new Date(user.created_at).toLocaleString()}</td>
@@ -455,7 +455,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                                     <button class="btn btn-danger btn-delete">Delete</button>
                                 </td>
                             </tr>
-                        \`;
+                        `;
                     }).join("");
             }
 
@@ -536,8 +536,8 @@ const adminPanelHTML = `<!DOCTYPE html>
                     document.getElementById("resetTraffic").checked = false;
                     editModal.classList.add("show");
                 } else if (btn.classList.contains("btn-delete")) {
-                    if (confirm(\`Are you sure you want to delete user ${uuid.substring(0, 8)}...?\`)) {
-                        api.delete(\`/users/${uuid}\`).then(() => {
+                    if (confirm(`Are you sure you want to delete user ${uuid.substring(0, 8)}...?`)) {
+                        api.delete(`/users/${uuid}`).then(() => {
                             showToast("User deleted successfully!");
                             refreshData();
                         }).catch((err) => showToast(err.message, true));
@@ -559,7 +559,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                 };
 
                 try {
-                    await api.put(\`/users/${uuid}\`, data);
+                    await api.put(`/users/${uuid}`, data);
                     showToast("User updated successfully!");
                     editModal.classList.remove("show");
                     refreshData();
