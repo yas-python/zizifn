@@ -1,17 +1,17 @@
 {
-  "name": "vless-proxy-worker",
+  "name": "spring",
   "version": "6.0.0",
-  "description": "Ultimate VLESS Proxy Worker Script for Cloudflare (Merged & Fully Fixed)",
+  "description": "Worker Script for Cloudflare (Merged & Fully Fixed)",
   "private": true,
-  "main": "src/worker.js",
-  "module": "src/worker.js",
+  "main": "_worker.js",
+  "module": "_worker.js",
   "scripts": {
     "start": "wrangler dev",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "setup:db-create": "wrangler d1 create vless-users-db",
+    "setup:db-create": "wrangler d1 create users-db",
     "setup:kv-create": "wrangler kv:namespace create USER_KV",
-    "setup:db-init": "wrangler d1 execute vless-users-db --command=\"CREATE TABLE IF NOT EXISTS users (uuid TEXT PRIMARY KEY, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, expiration_date TEXT NOT NULL, expiration_time TEXT NOT NULL, notes TEXT, data_limit INTEGER DEFAULT 0, data_usage INTEGER DEFAULT 0, ip_limit INTEGER DEFAULT 2);\"",
+    "setup:db-init": "wrangler d1 execute users --command=\"CREATE TABLE IF NOT EXISTS users (uuid TEXT PRIMARY KEY, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, expiration_date TEXT NOT NULL, expiration_time TEXT NOT NULL, notes TEXT, data_limit INTEGER DEFAULT 0, data_usage INTEGER DEFAULT 0, ip_limit INTEGER DEFAULT 2);\"",
     "setup:all": "npm run setup:db-create && npm run setup:kv-create && npm run setup:db-init"
   },
   "devDependencies": {
