@@ -1,115 +1,111 @@
 #!/usr/bin/env bash
-# ---------------------------------------------
-# ⚡ Ultimate Termux Cloudflare Setup Script ⚡
-# Fully automated, zero-error, professional setup
-# for Debian (proot-distro), Node.js 20, Wrangler CLI
-# ---------------------------------------------
+# ===========================================================
+# 🌐 UltraX Cloudflare UltraPro Edition (v7.9)
+# Fully Automated Cloudflare + GitHub Actions Environment
+# Author: GPT-5 SmartOps AI
+# ===========================================================
 set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
 IFS=$'\n\t'
 
-TARGET="${1:-both}"
-DISTRO="debian"
-WRAPPER="wrangler-proot"
-REPO="https://github.com/yas-python/zizifn.git"
-ZIP="https://github.com/yas-python/zizifn/archive/main.zip"
+echo -e "\n🧠 Initializing UltraPro Environment..."
 
-log() { echo -e "\033[1;32m[INFO]\033[0m $*"; }
-warn() { echo -e "\033[1;33m[WARN]\033[0m $*"; }
-err() { echo -e "\033[1;31m[ERROR]\033[0m $*" >&2; }
+# === [1] Termux Preparation ===
+pkg update -y || true
+pkg upgrade -y || true
+pkg install -y proot-distro curl wget git unzip jq openssl termux-api nodejs-lts || true
 
-ensure_termux() {
-  if ! command -v pkg >/dev/null 2>&1; then
-    err "Not in Termux environment!"
-    exit 1
-  fi
-}
-ensure_termux
-
-log "🚀 Updating Termux & installing essentials..."
-yes | pkg update -y || true
-yes | pkg upgrade -y || true
-pkg install -y proot-distro curl git wget unzip tar jq openssl termux-api || true
-
-# --- Debian setup
-if ! proot-distro list | grep -q "^${DISTRO}$"; then
-  log "📦 Installing Debian container..."
-  proot-distro install "$DISTRO"
+# === [2] Debian Install / Reinstall if Corrupted ===
+if ! proot-distro list | grep -q "^debian$"; then
+  echo -e "\n📦 Installing Debian container..."
+  proot-distro install debian
 else
-  log "✅ Debian container already exists."
+  echo -e "\n✅ Debian already installed. Repairing..."
+  proot-distro login debian -- bash -lc "apt-get update -y; apt-get -f install -y" || true
 fi
 
-# --- Debian bootstrap inside chroot
+# === [3] Bootstrap Inside Debian ===
 BOOTSTRAP=$(cat <<'EOF'
+#!/usr/bin/env bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
+echo -e "\n🧩 Updating Debian..."
 apt-get update -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confnew"
-apt-get -y dist-upgrade -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confnew"
-apt-get install -y curl ca-certificates gnupg git build-essential python3 python3-pip python3-venv \
+apt-get dist-upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confnew"
+
+echo -e "\n📦 Installing Core Dependencies..."
+apt-get install -y git curl gnupg build-essential python3 python3-pip ca-certificates openssl \
   -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confnew"
 
-log_install() { echo "[DEBIAN] $*"; }
-
-log_install "Installing Node.js 20..."
-curl -fsSL https://deb.nodesource.com/setup_20.x | bash - || true
-apt-get install -y nodejs --allow-unauthenticated -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confnew" || true
+echo -e "\n🧠 Installing Node.js 20 and npm..."
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+apt-get install -y nodejs
 
 npm set unsafe-perm true
-npm install -g wrangler --unsafe-perm=true || true
+npm install -g wrangler @cloudflare/pages gh || true
 
+echo -e "\n📂 Cloning project repository..."
 cd /root
-rm -rf /root/zizifn || true
+rm -rf zizifn || true
 git clone --depth 1 https://github.com/yas-python/zizifn.git || true
 
-echo "[DONE] Node.js + Wrangler + Repository installed."
+echo -e "\n🔧 Setting up GitHub CLI..."
+mkdir -p /root/.config/gh
+cat > /root/.config/gh/config.yml <<GEOF
+git_protocol: https
+prompt: disabled
+GEOF
+
+echo -e "\n🧠 Verifying installation..."
+node -v
+npm -v
+wrangler -V
+gh --version
 EOF
 )
 
-log "🧩 Bootstrapping Debian container..."
-proot-distro login "$DISTRO" --shared-tmp -- bash -lc "
+echo -e "\n🚀 Executing Debian Bootstrap..."
+proot-distro login debian --shared-tmp -- bash -lc "
 cat > /root/bootstrap.sh <<'BEOF'
 ${BOOTSTRAP}
 BEOF
 bash /root/bootstrap.sh
 "
 
-# --- Wrapper
+# === [4] Add Wrappers ===
 mkdir -p "$HOME/bin"
-cat > "$HOME/bin/$WRAPPER" <<'EOF'
+cat > "$HOME/bin/wrangler-proot" <<'EOF'
 #!/usr/bin/env bash
-set -euo pipefail
-args="$*"
-proot-distro login debian --shared-tmp -- bash -lc "export DEBIAN_FRONTEND=noninteractive; wrangler \$args"
+proot-distro login debian --shared-tmp -- bash -lc "wrangler $*"
 EOF
-chmod +x "$HOME/bin/$WRAPPER"
+cat > "$HOME/bin/gh-proot" <<'EOF'
+#!/usr/bin/env bash
+proot-distro login debian --shared-tmp -- bash -lc "gh $*"
+EOF
+cat > "$HOME/bin/pages-proot" <<'EOF'
+#!/usr/bin/env bash
+proot-distro login debian --shared-tmp -- bash -lc "npx @cloudflare/pages $*"
+EOF
+
+chmod +x $HOME/bin/*-proot
 grep -qxF 'export PATH=$HOME/bin:$PATH' ~/.profile || echo 'export PATH=$HOME/bin:$PATH' >> ~/.profile
-export PATH="$HOME/bin:$PATH"
+export PATH=$HOME/bin:$PATH
 
-log "✅ Wrapper created: $WRAPPER"
-log "⚙️ Cloning repository to Termux home..."
-
-cd "$HOME"
-rm -rf "$HOME/zizifn" || true
-git clone --depth 1 "$REPO" || {
-  warn "git failed, using zip fallback..."
-  wget -qO /tmp/zizifn-main.zip "$ZIP"
-  unzip -q /tmp/zizifn-main.zip -d /tmp || true
-  mv /tmp/zizifn-main "$HOME/zizifn" || true
-}
-
-cat > "$HOME/zizifn-next.sh" <<EOF
+# === [5] Auto Login Helper ===
+cat > "$HOME/cloudflare-login.sh" <<'EOF'
 #!/usr/bin/env bash
-echo "================ NEXT STEPS ================"
-echo "To run Wrangler inside Debian: wrangler-proot --version"
-echo "Login: proot-distro login debian -- bash -lc 'wrangler login'"
-echo "Repo: ~/zizifn"
-echo "============================================"
+echo "🌐 Opening Cloudflare Login..."
+termux-open-url "https://dash.cloudflare.com/sign-up" >/dev/null 2>&1 || am start -a android.intent.action.VIEW -d "https://dash.cloudflare.com/sign-up"
+proot-distro login debian -- bash -lc "wrangler login"
 EOF
-chmod +x "$HOME/zizifn-next.sh"
+chmod +x "$HOME/cloudflare-login.sh"
 
-log "✅ All steps complete."
-log "💡 Run:  ./zizifn-next.sh"
-log "📂 Repo: ~/zizifn"
-log "🌐 Opening GitHub page..."
-(termux-open-url "$REPO" >/dev/null 2>&1 || am start -a android.intent.action.VIEW -d "$REPO" >/dev/null 2>&1 || true)
-log "🎉 Installation finished successfully! No errors."
+# === [6] Final Summary ===
+echo -e "\n============================================"
+echo "✅ Installation Complete – UltraX Cloudflare UltraPro"
+echo "➡️ To login Cloudflare: ./cloudflare-login.sh"
+echo "➡️ To run Wrangler:     wrangler-proot dev"
+echo "➡️ To deploy Pages:     pages-proot deploy"
+echo "➡️ To use GitHub CLI:   gh-proot auth login"
+echo "============================================"
