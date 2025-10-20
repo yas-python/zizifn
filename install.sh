@@ -6,6 +6,93 @@ GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Function to install prerequisites
+function install_prerequisites() {
+    echo -e "${BLUE}Checking and installing prerequisites...${NC}"
+
+    # Detect OS
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$NAME
+    elif [ -f /etc/lsb-release ]; then
+        . /etc/lsb-release
+        OS=$DISTRIB_DESCRIPTION
+    else
+        OS=$(uname -s)
+    fi
+
+    # Install prerequisites based on OS
+    case "$OS" in
+        "Ubuntu"|"Debian GNU/Linux"|"Linux Mint"|"Pop!_OS"*)
+            if ! command -v curl &> /dev/null; then
+                echo "Installing curl..."
+                sudo apt-get update && sudo apt-get install -y curl
+            fi
+            if ! command -v jq &> /dev/null; then
+                echo "Installing jq..."
+                sudo apt-get install -y jq
+            fi
+            if ! command -v wrangler &> /dev/null; then
+                echo "Installing wrangler..."
+                curl -fsSL https://github.com/cloudflare/wrangler/releases/latest/download/wrangler-linux-x64.tar.gz | tar -xzv -C /tmp
+                sudo mv /tmp/wrangler /usr/local/bin/
+                if [ $? -ne 0 ]; then
+                    echo "Failed to install wrangler. Please install manually."
+                    exit 1
+                fi
+            fi
+            ;;
+        "Fedora"|"CentOS Linux"|"Red Hat Enterprise Linux"*)
+            if ! command -v curl &> /dev/null; then
+                echo "Installing curl..."
+                sudo yum install -y curl
+            fi
+            if ! command -v jq &> /dev/null; then
+                echo "Installing jq..."
+                sudo yum install -y jq
+            fi
+            if ! command -v wrangler &> /dev/null; then
+                echo "Installing wrangler..."
+                curl -fsSL https://github.com/cloudflare/wrangler/releases/latest/download/wrangler-linux-x64.tar.gz | tar -xzv -C /tmp
+                sudo mv /tmp/wrangler /usr/local/bin/
+                if [ $? -ne 0 ]; then
+                    echo "Failed to install wrangler. Please install manually."
+                    exit 1
+                fi
+            fi
+            ;;
+        "Darwin"*) # macOS
+            if ! command -v curl &> /dev/null; then
+                echo "Installing curl via Homebrew..."
+                /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+                brew install curl
+            fi
+            if ! command -v jq &> /dev/null; then
+                echo "Installing jq via Homebrew..."
+                brew install jq
+            fi
+            if ! command -v wrangler &> /dev/null; then
+                echo "Installing wrangler via npm..."
+                if ! command -v npm &> /dev/null; then
+                    echo "Installing Node.js and npm..."
+                    brew install node
+                fi
+                npm install -g wrangler
+                if [ $? -ne 0 ]; then
+                    echo "Failed to install wrangler via npm. Please install manually."
+                    exit 1
+                fi
+            fi
+            ;;
+        *)
+            echo "Unsupported OS: $OS. Please install curl, jq, and wrangler manually."
+            exit 1
+            ;;
+    esac
+
+    echo -e "${GREEN}Prerequisites installed successfully.${NC}"
+}
+
 # Function to show menu and handle user input
 function show_menu() {
     # Display channel names in colors
@@ -290,7 +377,7 @@ function create_worker() {
         if command -v uuidgen &> /dev/null; then
             NEW_UUID=$(uuidgen | tr '[:upper:]' '[:lower:]')
         else
-            NEW_UUID=$(cat /proc/sys/kernel/random/uuid)
+            NEW_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "default-uuid")
         fi
 
         # Replace UUID in the script using cross-platform sed
@@ -474,7 +561,7 @@ function create_pages() {
         if command -v uuidgen &> /dev/null; then
             NEW_UUID=$(uuidgen | tr '[:upper:]' '[:lower:]')
         else
-            NEW_UUID=$(cat /proc/sys/kernel/random/uuid)
+            NEW_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "default-uuid")
         fi
         sed -i.bak "s/[0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}/$NEW_UUID/g" _worker.js && rm -f _worker.js.bak
         echo "UUID has been changed to: $NEW_UUID"
@@ -556,30 +643,15 @@ function delete_pages() {
 }
 
 # Main script logic
+echo -e "${BLUE}Starting script initialization...${NC}"
+install_prerequisites
+
 echo "Please enter your Cloudflare API token:"
 read -rs CLOUDFLARE_API_TOKEN  # Secure input
 export CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN"
 echo "Please enter your Cloudflare Account ID:"
 read -r ACCOUNT_ID
 export CLOUDFLARE_ACCOUNT_ID="$ACCOUNT_ID"
-
-# Check if jq is installed
-if ! command -v jq &> /dev/null; then
-    echo "jq is not installed. Please install jq to parse JSON responses."
-    exit 1
-fi
-
-# Check if wrangler is installed
-if ! command -v wrangler &> /dev/null; then
-    echo "wrangler is not installed. Please install wrangler CLI."
-    exit 1
-fi
-
-# Check if curl is installed
-if ! command -v curl &> /dev/null; then
-    echo "curl is not installed. Please install curl."
-    exit 1
-fi
 
 # Loop to show the menu repeatedly
 while true; do
