@@ -1,94 +1,544 @@
 #!/bin/bash
 
-# This script sets up Wrangler in Termux using proot-distro with Debian,
-# creates a wrapper for Wrangler, downloads the project files,
-# installs dependencies inside chroot to avoid cache issues,
-# prompts for deployment type (Workers or Pages),
-# cleans up unnecessary files to prevent size limit errors,
-# handles login (which opens browser for authorization),
-# and deploys automatically. It's designed to be error-free and smart.
+# ANSI color codes
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
-set -e  # Exit on error
+# Function to show menu and handle user input
+function show_menu() {
+    # Display channel names in colors
+    echo -e "${RED}YOUTUBE: KOLANDONE${NC}"
+    echo -e "${BLUE}TELEGRAM: KOLANDJS${NC}"
 
-echo "Updating Termux packages..."
-pkg update -y || true
-pkg install -y proot-distro curl git || true
+    echo "Choose an option or type 'exit' to quit:"
+    echo "1) List all Workers"
+    echo "2) Create a Worker or Pages Project"
+    echo "3) Delete a Worker"
+    echo "4) List all Pages Projects"
+    echo "5) Delete a Pages Project"
+    read -r USER_OPTION
 
-echo "Installing Debian distro if not already installed..."
-if ! proot-distro list | grep -q "debian"; then
-    proot-distro install debian
-fi
+    case $USER_OPTION in
+        1)
+            list_all_workers
+            ;;
+        2)
+            create_project
+            ;;
+        3)
+            delete_worker
+            ;;
+        4)
+            list_all_pages
+            ;;
+        5)
+            delete_pages
+            ;;
+        "exit")
+            echo "Exiting script."
+            exit 0
+            ;;
+        *)
+            echo "Invalid option selected."
+            ;;
+    esac
+}
 
-echo "Setting up Node.js and Wrangler inside Debian chroot..."
-proot-distro login debian --shared-tmp -- bash -c '
-set -e
-apt update && apt upgrade -y || true
-apt install -y curl ca-certificates build-essential gnupg || true
-if ! command -v node &> /dev/null; then
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-    apt install -y nodejs
-fi
-npm install -g wrangler --unsafe-perm=true || true
-wrangler --version || echo "Wrangler installation check failed, but continuing..."
-'
+# Function to list all Workers and allow user to select one to get the visit link
+function list_all_workers() {
+    # Retrieve the list of Workers and their details
+    WORKERS_DETAILS=$(curl -s -X GET "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/workers/scripts" \
+        -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
 
-echo "Creating Wrangler wrapper if not exists..."
-mkdir -p $HOME/bin
-if [ ! -f $HOME/bin/wrangler-proot ]; then
-    cat > $HOME/bin/wrangler-proot <<'EOF'
-#!/usr/bin/env bash
-proot-distro login debian --shared-tmp -- bash -lc "wrangler $*"
-EOF
-    chmod +x $HOME/bin/wrangler-proot
-fi
+    if echo "$WORKERS_DETAILS" | grep -q '"success":false'; then
+        echo "Failed to list workers: $(echo "$WORKERS_DETAILS" | jq -r '.errors[0].message')"
+        return
+    fi
+    
+    # Parse the list of Workers
+    echo "List of Workers:"
+    echo "$WORKERS_DETAILS" | jq -r '.result[] | .id' | nl -w1 -s') '
 
-echo "Adding ~/bin to PATH if not already..."
-if ! grep -q 'export PATH=$HOME/bin:$PATH' ~/.profile; then
-    echo 'export PATH=$HOME/bin:$PATH' >> ~/.profile
-fi
-export PATH=$HOME/bin:$PATH
+    # Ask the user to select a Worker to get the visit link
+    echo "Enter the number of the Worker to get the visit link or type 'back' to return to the main menu:"
+    read -r WORKER_SELECTION
 
-echo "Testing Wrangler wrapper..."
-wrangler-proot --version || echo "Wrapper test failed, but continuing..."
+    if [[ "$WORKER_SELECTION" =~ ^[0-9]+$ ]]; then
+        # Get the Worker name based on user selection
+        SELECTED_WORKER_NAME=$(echo "$WORKERS_DETAILS" | jq -r --argjson WORKER_SELECTION "$WORKER_SELECTION" '.result[$WORKER_SELECTION - 1] | .id')
+        
+        # Call the function to get the workers.dev subdomain for the selected Worker
+        get_workers_dev_subdomain "$SELECTED_WORKER_NAME"
+    elif [ "$WORKER_SELECTION" == "back" ]; then
+        return
+    else
+        echo "Invalid selection."
+    fi
+}
 
-echo "Setting up the project directory..."
-PROJECT_DIR="$HOME/zizifn"
-mkdir -p "$PROJECT_DIR"
-cd "$PROJECT_DIR"
+# Function to get the workers.dev subdomain for a Worker
+function get_workers_dev_subdomain() {
+    local WORKER_NAME=$1
+    # Retrieve the workers.dev subdomain for the given Worker name
+    WORKER_SUBDOMAIN=$(curl -s -X GET "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/workers/subdomain" \
+        -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | jq -r '.result.subdomain')
 
-echo "Downloading project files if not already present..."
-[ -f wrangler.toml ] || curl -sS -o wrangler.toml https://raw.githubusercontent.com/yas-python/zizifn/refs/heads/main/wrangler.toml
-[ -f package.json ] || curl -sS -o package.json https://raw.githubusercontent.com/yas-python/zizifn/refs/heads/main/package.json
-[ -f _worker.js ] || curl -sS -o _worker.js https://raw.githubusercontent.com/yas-python/zizifn/refs/heads/main/_worker.js
+    # Check if the workers.dev subdomain was retrieved successfully
+    if [ -n "$WORKER_SUBDOMAIN" ]; then
+        echo -e "The visit link for ${GREEN}$WORKER_NAME${NC} is: ${GREEN}https://${WORKER_NAME}.${WORKER_SUBDOMAIN}.workers.dev${NC}"
+    else
+        echo "Failed to retrieve the workers.dev subdomain for $WORKER_NAME."
+    fi
+}
 
-echo "Installing npm dependencies inside chroot..."
-proot-distro login debian --shared-tmp -- bash -c "cd $PWD; npm install" || true
+# Function to list all Pages projects
+function list_all_pages() {
+    # Retrieve the list of Pages projects
+    PAGES_DETAILS=$(curl -s -X GET "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/pages/projects" \
+        -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
 
-echo "Cleaning up unnecessary files to avoid size limits..."
-rm -rf .npm node_modules/.cache .cache || true
+    if echo "$PAGES_DETAILS" | grep -q '"success":false'; then
+        echo "Failed to list pages projects: $(echo "$PAGES_DETAILS" | jq -r '.errors[0].message')"
+        return
+    fi
+    
+    # Parse the list of Pages projects
+    echo "List of Pages Projects:"
+    echo "$PAGES_DETAILS" | jq -r '.result[] | .name' | nl -w1 -s') '
 
-echo "Choose deployment type:"
-echo "1) Cloudflare Workers"
-echo "2) Cloudflare Pages"
-read -p "Enter 1 or 2: " choice
+    # Ask the user to select a project to get the visit link
+    echo "Enter the number of the Pages project to get the visit link or type 'back' to return to the main menu:"
+    read -r PAGES_SELECTION
 
-if [ "$choice" = "1" ]; then
-    echo "Logging in to Cloudflare (this will open the browser for authorization)..."
-    wrangler-proot login || true
-    echo "Deploying to Cloudflare Workers..."
-    wrangler-proot deploy
-elif [ "$choice" = "2" ]; then
-    echo "Enter a unique name for your Cloudflare Pages project:"
-    read -p "Project name: " project_name
-    echo "Logging in to Cloudflare (this will open the browser for authorization)..."
-    wrangler-proot login || true
-    echo "Creating Pages project if not exists..."
-    wrangler-proot pages project create "$project_name" --production-branch main || true
-    echo "Deploying to Cloudflare Pages..."
-    wrangler-proot pages deploy . --project-name="$project_name"
-else
-    echo "Invalid choice. Exiting."
-    exit 1
-fi
+    if [[ "$PAGES_SELECTION" =~ ^[0-9]+$ ]]; then
+        # Get the project name based on user selection
+        SELECTED_PAGES_NAME=$(echo "$PAGES_DETAILS" | jq -r --argjson PAGES_SELECTION "$PAGES_SELECTION" '.result[$PAGES_SELECTION - 1] | .name')
+        
+        # Echo the pages.dev link
+        echo -e "The visit link for ${GREEN}$SELECTED_PAGES_NAME${NC} is: ${GREEN}https://${SELECTED_PAGES_NAME}.pages.dev${NC}"
+    elif [ "$PAGES_SELECTION" == "back" ]; then
+        return
+    else
+        echo "Invalid selection."
+    fi
+}
 
-echo "Deployment complete! If the browser didn't open automatically during login, check your Termux notifications or run 'wrangler-proot login' manually."
+# Function to create a Worker or Pages project
+function create_project() {
+    # Prompt for the type: Worker or Pages
+    echo "Do you want to create a Worker or a Pages project? (worker/pages)"
+    read -r PROJECT_TYPE
+
+    if [ "$PROJECT_TYPE" == "worker" ]; then
+        create_worker
+    elif [ "$PROJECT_TYPE" == "pages" ]; then
+        create_pages
+    else
+        echo "Invalid type selected."
+        return
+    fi
+}
+
+# Function to create a Worker
+function create_worker() {
+    # Prompt for the Worker name
+    echo "Please enter a name for your Cloudflare Worker:"
+    read -r PROJECT_NAME
+
+    # Ask if the user needs a KV namespace
+    echo "Do you need a KV namespace? (yes/no)"
+    read -r NEED_KV
+
+    KV_BINDING=""
+    KV_ID=""
+
+    if [ "$NEED_KV" == "yes" ]; then
+        # Prompt for the KV namespace name
+        echo "Please enter a name for your KV namespace:"
+        read -r KV_NAMESPACE_NAME
+
+        # Prompt for the binding variable name
+        echo "Please enter the name for the KV binding variable (e.g., USER_KV):"
+        read -r KV_BINDING
+
+        # Create the KV namespace using the Cloudflare API
+        CREATE_KV_RESPONSE=$(curl -s -X POST "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/storage/kv/namespaces" \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "{\"title\":\"$KV_NAMESPACE_NAME\"}")
+
+        # Extract the KV namespace ID from the response
+        KV_ID=$(echo "$CREATE_KV_RESPONSE" | jq -r '.result.id')
+
+        # Check if the KV namespace was created successfully
+        if [ -n "$KV_ID" ]; then
+            echo "KV namespace created successfully with ID: $KV_ID"
+        else
+            echo "Failed to create KV namespace."
+            echo "Response: $CREATE_KV_RESPONSE"
+            return
+        fi
+    fi
+
+    # Ask if the user needs a D1 database
+    echo "Do you need a D1 database? (yes/no)"
+    read -r NEED_D1
+
+    D1_BINDING=""
+    D1_NAME=""
+    D1_ID=""
+
+    if [ "$NEED_D1" == "yes" ]; then
+        # Prompt for the D1 database name
+        echo "Please enter a name for your D1 database:"
+        read -r D1_NAME
+
+        # Prompt for the binding variable name
+        echo "Please enter the name for the D1 binding variable (e.g., DB):"
+        read -r D1_BINDING
+
+        # Create the D1 database using the Cloudflare API
+        CREATE_D1_RESPONSE=$(curl -s -X POST "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/d1/database" \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "{\"name\":\"$D1_NAME\"}")
+
+        # Extract the D1 ID from the response
+        D1_ID=$(echo "$CREATE_D1_RESPONSE" | jq -r '.result.id')
+
+        # Check if the D1 was created successfully
+        if [ -n "$D1_ID" ]; then
+            echo "D1 database created successfully with ID: $D1_ID"
+            
+            # Initialize the DB with the create table command
+            INIT_COMMAND="CREATE TABLE IF NOT EXISTS users (uuid TEXT PRIMARY KEY, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, expiration_date TEXT NOT NULL, expiration_time TEXT NOT NULL, notes TEXT, data_limit INTEGER DEFAULT 0, data_usage INTEGER DEFAULT 0, ip_limit INTEGER DEFAULT 2);"
+            wrangler d1 execute "$D1_NAME" --command="$INIT_COMMAND"
+            if [ $? -eq 0 ]; then
+                echo "D1 table initialized successfully."
+            else
+                echo "Failed to initialize D1 table."
+            fi
+        else
+            echo "Failed to create D1 database."
+            echo "Response: $CREATE_D1_RESPONSE"
+            return
+        fi
+    fi
+
+    # Generate the worker directory
+    wrangler generate "$PROJECT_NAME"
+
+    # Change to the worker directory
+    cd "$PROJECT_NAME" || { echo "Failed to change directory to $PROJECT_NAME"; exit 1; }
+
+    # Add account_id to wrangler.toml
+    echo "account_id = \"$ACCOUNT_ID\"" >> wrangler.toml
+
+    # Add KV binding if created
+    if [ -n "$KV_ID" ]; then
+        echo "kv_namespaces = [" >> wrangler.toml
+        echo "  { binding = \"$KV_BINDING\", id = \"$KV_ID\" }" >> wrangler.toml
+        echo "]" >> wrangler.toml
+    fi
+
+    # Add D1 binding if created
+    if [ -n "$D1_ID" ]; then
+        echo "d1_databases = [" >> wrangler.toml
+        echo "  { binding = \"$D1_BINDING\", database_name = \"$D1_NAME\", database_id = \"$D1_ID\" }" >> wrangler.toml
+        echo "]" >> wrangler.toml
+    fi
+
+    # Prompt for the URL of the new script
+    echo "Please enter the URL of the script you want to use to update index.js (or leave blank for default):"
+    read -r SCRIPT_URL
+
+    if [ -n "$SCRIPT_URL" ]; then
+        # Fetch the new script content from the URL and save it as index.js in the src directory
+        curl -s "$SCRIPT_URL" -o src/index.js
+        if [ $? -ne 0 ]; then
+            echo "Failed to download the new script content."
+            return
+        fi
+        echo "New script content downloaded successfully to src/index.js."
+    fi
+
+    # Ask if the user wants to change the UUID
+    echo "Do you want to change the UUID in the script? (yes/no)"
+    read -r CHANGE_UUID
+
+    if [ "$CHANGE_UUID" == "yes" ]; then
+        # Generate a random UUID
+        NEW_UUID=$(uuidgen | tr 'A-F' 'a-f')
+
+        # Replace UUID in the script (assuming it's a standard format)
+        sed -i '' "s/[0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}/$NEW_UUID/g" src/index.js
+
+        echo "UUID has been changed to: $NEW_UUID"
+    fi
+
+    # Ask if to add secrets
+    echo "Do you want to add secrets (e.g., ADMIN_KEY, etc.)? (yes/no)"
+    read -r ADD_SECRETS
+
+    if [ "$ADD_SECRETS" == "yes" ]; then
+        # Prompt for each secret
+        declare -a SECRETS=("ADMIN_KEY" "ADMIN_PATH" "UUID" "PROXYIP" "SCAMALYTICS_API_KEY" "SOCKS5" "SOCKS5_RELAY" "ROOT_PROXY_URL")
+
+        for SECRET in "${SECRETS[@]}"; do
+            echo "Enter value for $SECRET (or leave blank to skip):"
+            read -r SECRET_VALUE
+            if [ -n "$SECRET_VALUE" ]; then
+                echo "$SECRET_VALUE" | wrangler secret put "$SECRET"
+                if [ $? -ne 0 ]; then
+                    echo "Failed to set secret $SECRET."
+                else
+                    echo "Secret $SECRET set successfully."
+                fi
+            fi
+        done
+    fi
+
+    # Deploy the worker
+    DEPLOY_RESPONSE=$(wrangler deploy)
+    if [ $? -eq 0 ]; then
+        echo "Worker deployed successfully."
+        # Show the visit link
+        get_workers_dev_subdomain "$PROJECT_NAME"
+
+        # If UUID was changed, display it
+        if [ "$CHANGE_UUID" == "yes" ]; then
+            echo "New UUID: $NEW_UUID"
+        fi
+    else
+        echo "Failed to deploy worker."
+        echo "Response: $DEPLOY_RESPONSE"
+    fi
+
+    # Change back to original directory
+    cd ..
+}
+
+# Function to create a Pages project
+function create_pages() {
+    # Prompt for the Pages project name
+    echo "Please enter a name for your Cloudflare Pages project:"
+    read -r PROJECT_NAME
+
+    # Check if project exists
+    PAGES_CHECK=$(curl -s -X GET "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/pages/projects/$PROJECT_NAME" \
+        -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
+
+    if echo "$PAGES_CHECK" | grep -q '"success":true'; then
+        echo "Pages project $PROJECT_NAME already exists."
+    else
+        # Create the Pages project
+        wrangler pages project create "$PROJECT_NAME" --production-branch main
+        if [ $? -ne 0 ]; then
+            echo "Failed to create Pages project."
+            return
+        fi
+        echo "Pages project created successfully."
+    fi
+
+    # Ask for KV and D1, same as worker
+    echo "Do you need a KV namespace? (yes/no)"
+    read -r NEED_KV
+
+    KV_BINDING=""
+    KV_ID=""
+
+    if [ "$NEED_KV" == "yes" ]; then
+        echo "Please enter a name for your KV namespace:"
+        read -r KV_NAMESPACE_NAME
+
+        echo "Please enter the name for the KV binding variable (e.g., USER_KV):"
+        read -r KV_BINDING
+
+        CREATE_KV_RESPONSE=$(curl -s -X POST "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/storage/kv/namespaces" \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "{\"title\":\"$KV_NAMESPACE_NAME\"}")
+
+        KV_ID=$(echo "$CREATE_KV_RESPONSE" | jq -r '.result.id')
+
+        if [ -n "$KV_ID" ]; then
+            echo "KV namespace created successfully with ID: $KV_ID"
+        else
+            echo "Failed to create KV namespace."
+            return
+        fi
+    fi
+
+    echo "Do you need a D1 database? (yes/no)"
+    read -r NEED_D1
+
+    D1_BINDING=""
+    D1_NAME=""
+    D1_ID=""
+
+    if [ "$NEED_D1" == "yes" ]; then
+        echo "Please enter a name for your D1 database:"
+        read -r D1_NAME
+
+        echo "Please enter the name for the D1 binding variable (e.g., DB):"
+        read -r D1_BINDING
+
+        CREATE_D1_RESPONSE=$(curl -s -X POST "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/d1/database" \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "{\"name\":\"$D1_NAME\"}")
+
+        D1_ID=$(echo "$CREATE_D1_RESPONSE" | jq -r '.result.id')
+
+        if [ -n "$D1_ID" ]; then
+            echo "D1 database created successfully with ID: $D1_ID"
+
+            INIT_COMMAND="CREATE TABLE IF NOT EXISTS users (uuid TEXT PRIMARY KEY, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, expiration_date TEXT NOT NULL, expiration_time TEXT NOT NULL, notes TEXT, data_limit INTEGER DEFAULT 0, data_usage INTEGER DEFAULT 0, ip_limit INTEGER DEFAULT 2);"
+            wrangler d1 execute "$D1_NAME" --command="$INIT_COMMAND"
+            if [ $? -eq 0 ]; then
+                echo "D1 table initialized successfully."
+            else
+                echo "Failed to initialize D1 table."
+            fi
+        else
+            echo "Failed to create D1 database."
+            return
+        fi
+    fi
+
+    # Create a directory for the Pages project
+    mkdir "$PROJECT_NAME"
+    cd "$PROJECT_NAME" || { echo "Failed to change directory to $PROJECT_NAME"; exit 1; }
+
+    # Create wrangler.toml
+    touch wrangler.toml
+    echo "name = \"$PROJECT_NAME\"" >> wrangler.toml
+    echo "account_id = \"$ACCOUNT_ID\"" >> wrangler.toml
+    echo "compatibility_date = \"$(date +%Y-%m-%d)\"" >> wrangler.toml
+
+    # Add KV binding if created
+    if [ -n "$KV_ID" ]; then
+        echo "kv_namespaces = [" >> wrangler.toml
+        echo "  { binding = \"$KV_BINDING\", id = \"$KV_ID\" }" >> wrangler.toml
+        echo "]" >> wrangler.toml
+    fi
+
+    # Add D1 binding if created
+    if [ -n "$D1_ID" ]; then
+        echo "d1_databases = [" >> wrangler.toml
+        echo "  { binding = \"$D1_BINDING\", database_name = \"$D1_NAME\", database_id = \"$D1_ID\" }" >> wrangler.toml
+        echo "]" >> wrangler.toml
+    fi
+
+    # Prompt for the script URL
+    echo "Please enter the URL of the script you want to use to update _worker.js (or leave blank for default):"
+    read -r SCRIPT_URL
+
+    if [ -n "$SCRIPT_URL" ]; then
+        curl -s "$SCRIPT_URL" -o _worker.js
+        if [ $? -ne 0 ]; then
+            echo "Failed to download the script content."
+            return
+        fi
+        echo "Script content downloaded successfully to _worker.js."
+    fi
+
+    # Change UUID if yes
+    echo "Do you want to change the UUID in the script? (yes/no)"
+    read -r CHANGE_UUID
+
+    if [ "$CHANGE_UUID" == "yes" ]; then
+        NEW_UUID=$(uuidgen | tr 'A-F' 'a-f')
+        sed -i '' "s/[0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}/$NEW_UUID/g" _worker.js
+        echo "UUID has been changed to: $NEW_UUID"
+    fi
+
+    # Add secrets
+    echo "Do you want to add secrets (e.g., ADMIN_KEY, etc.)? (yes/no)"
+    read -r ADD_SECRETS
+
+    if [ "$ADD_SECRETS" == "yes" ]; then
+        declare -a SECRETS=("ADMIN_KEY" "ADMIN_PATH" "UUID" "PROXYIP" "SCAMALYTICS_API_KEY" "SOCKS5" "SOCKS5_RELAY" "ROOT_PROXY_URL")
+
+        for SECRET in "${SECRETS[@]}"; do
+            echo "Enter value for $SECRET (or leave blank to skip):"
+            read -r SECRET_VALUE
+            if [ -n "$SECRET_VALUE" ]; then
+                echo "$SECRET_VALUE" | wrangler secret put "$SECRET" --project-name "$PROJECT_NAME"
+                if [ $? -ne 0 ]; then
+                    echo "Failed to set secret $SECRET."
+                else
+                    echo "Secret $SECRET set successfully."
+                fi
+            fi
+        done
+    fi
+
+    # Deploy the pages project
+    DEPLOY_RESPONSE=$(wrangler pages deploy . --project-name "$PROJECT_NAME")
+    if [ $? -eq 0 ]; then
+        echo "Pages project deployed successfully."
+        echo -e "The visit link is: ${GREEN}https://${PROJECT_NAME}.pages.dev${NC}"
+
+        if [ "$CHANGE_UUID" == "yes" ]; then
+            echo "New UUID: $NEW_UUID"
+        fi
+    else
+        echo "Failed to deploy pages project."
+        echo "Response: $DEPLOY_RESPONSE"
+    fi
+
+    # Change back
+    cd ..
+}
+
+# Function to delete a Worker
+function delete_worker() {
+    # Prompt for the Worker name to delete
+    echo "Enter the name of the Worker you want to delete:"
+    read -r DELETE_NAME
+
+    # Delete the selected Worker
+    DELETE_RESPONSE=$(curl -s -X DELETE "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/workers/scripts/$DELETE_NAME" \
+        -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
+
+    if echo "$DELETE_RESPONSE" | grep -q '"success":true'; then
+        echo "Worker $DELETE_NAME deleted successfully."
+    else
+        echo "Failed to delete worker $DELETE_NAME."
+        echo "Response: $DELETE_RESPONSE"
+    fi
+}
+
+# Function to delete a Pages project
+function delete_pages() {
+    # Prompt for the Pages project name to delete
+    echo "Enter the name of the Pages project you want to delete:"
+    read -r DELETE_NAME
+
+    # Delete the selected Pages project
+    DELETE_RESPONSE=$(curl -s -X DELETE "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/pages/projects/$DELETE_NAME" \
+        -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
+
+    if echo "$DELETE_RESPONSE" | grep -q '"success":true'; then
+        echo "Pages project $DELETE_NAME deleted successfully."
+    else
+        echo "Failed to delete pages project $DELETE_NAME."
+        echo "Response: $DELETE_RESPONSE"
+    fi
+}
+
+# Main script logic
+echo "Please enter your Cloudflare API token:"
+read -r CLOUDFLARE_API_TOKEN
+export CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN"
+echo "Please enter your Cloudflare Account ID:"
+read -r ACCOUNT_ID
+export CLOUDFLARE_ACCOUNT_ID="$ACCOUNT_ID"  # For wrangler if needed
+
+# Loop to show the menu repeatedly
+while true; do
+    show_menu
+done
