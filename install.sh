@@ -1,10 +1,10 @@
 #!/bin/bash
 
 #=================================================================================
-# نصب‌کننده و اجراکننده خودکار مدیریت Cloudflare
+# نصب‌کننده و اجراکننده خودکار مدیریت Cloudflare (نسخه اصلاح‌شده و هوشمند)
 # این اسکریپت در Termux اجرا می‌شود.
 # 1. Debian را نصب می‌کند.
-# 2. پیش‌نیازها را در Debian نصب می‌کند.
+# 2. پیش‌نیازها را در Debian نصب می‌کند. (به صورت کاملاً غیر-تعاملی)
 # 3. اسکریپت مدیریت را ساخته و اجرا می‌کند.
 #=================================================================================
 
@@ -21,9 +21,20 @@ echo -e "${BLUE}TELEGRAM: KOLANDJS${NC}"
 echo -e "${GREEN}===============================================${NC}"
 echo -e "${YELLOW}شروع فرآیند نصب کامل... (اجرا در Termux)${NC}"
 
-# --- مرحله ۱: نصب پیش‌نیازهای Termux ---
-echo -e "\n${YELLOW}مرحله ۱: به‌روزرسانی Termux و نصب proot-distro...${NC}"
-pkg update -y && pkg upgrade -y
+# --- مرحله ۱: نصب پیش‌نیازهای Termux (اصلاح‌شده برای اجرای تماماً خودکار) ---
+echo -e "\n${YELLOW}مرحله ۱: به‌روزرسانی Termux و نصب proot-distro (به صورت کاملاً خودکار)...${NC}"
+# تنظیم DEBIAN_FRONTEND و --force-confnew برای جلوگیری از هنگ کردن در پنجره‌های dpkg
+DEBIAN_FRONTEND=noninteractive pkg update -y
+if [ $? -ne 0 ]; then
+    echo -e "${RED}خطا در pkg update.${NC}"
+    exit 1
+fi
+# استفاده از -o Dpkg::Options... برای پذیرش خودکار تمام کانفیگ‌های جدید
+DEBIAN_FRONTEND=noninteractive pkg upgrade -y -o Dpkg::Options::="--force-confnew"
+if [ $? -ne 0 ]; then
+    echo -e "${RED}خطا در pkg upgrade. ${NC}"
+    exit 1
+fi
 pkg install proot-distro -y
 if [ $? -ne 0 ]; then
     echo -e "${RED}خطا در نصب proot-distro. لطفاً به صورت دستی بررسی کنید.${NC}"
@@ -40,19 +51,40 @@ if [ $? -ne 0 ]; then
 fi
 echo -e "${GREEN}Debian با موفقیت نصب شد.${NC}"
 
-# --- مرحله ۳: نصب پیش‌نیازها در داخل Debian (به صورت خودکار) ---
+# --- مرحله ۳: نصب پیش‌نیازها در داخل Debian (اصلاح‌شده برای اجرای تماماً خودکار و عیب‌یابی بهتر) ---
 echo -e "\n${YELLOW}مرحله ۳: نصب پیش‌نیازها (apt, npm, wrangler) در داخل Debian...${NC}"
 
 # اجرای دستورات نصب در داخل دبیان با proot-distro exec
-proot-distro exec debian -- apt update -y
-proot-distro exec debian -- apt upgrade -y
-proot-distro exec debian -- apt install -y curl jq nodejs npm
-proot-distro exec debian -- npm install -g wrangler
-
+# استفاده از export DEBIAN_FRONTEND=noninteractive برای جلوگیری از هنگ کردن apt
+echo -e "${YELLOW}... در حال به‌روزرسانی apt در Debian...${NC}"
+proot-distro exec debian -- bash -c "export DEBIAN_FRONTEND=noninteractive && apt update -y"
 if [ $? -ne 0 ]; then
-    echo -e "${RED}خطا در نصب پیش‌نیازهای داخل Debian. لطفاً بررسی کنید.${NC}"
+    echo -e "${RED}خطا در apt update داخل Debian.${NC}"
     exit 1
 fi
+
+echo -e "${YELLOW}... در حال ارتقاء پکیج‌ها در Debian...${NC}"
+proot-distro exec debian -- bash -c "export DEBIAN_FRONTEND=noninteractive && apt upgrade -y -o Dpkg::Options::=\"--force-confnew\""
+if [ $? -ne 0 ]; then
+    echo -e "${RED}خطا در apt upgrade داخل Debian.${NC}"
+    exit 1
+fi
+
+echo -e "${YELLOW}... در حال نصب curl, jq, nodejs, npm در Debian...${NC}"
+proot-distro exec debian -- bash -c "export DEBIAN_FRONTEND=noninteractive && apt install -y curl jq nodejs npm"
+if [ $? -ne 0 ]; then
+    echo -e "${RED}خطا در نصب پکیج‌های apt داخل Debian.${NC}"
+    exit 1
+fi
+
+echo -e "${YELLOW}... در حال نصب wrangler با npm...${NC}"
+# اجرای npm install به صورت جداگانه
+proot-distro exec debian -- npm install -g wrangler
+if [ $? -ne 0 ]; then
+    echo -e "${RED}خطا در نصب wrangler. لطفاً بررسی کنید.${NC}"
+    exit 1
+fi
+
 echo -e "${GREEN}تمام پیش‌نیازهای Debian با موفقیت نصب شدند.${NC}"
 
 # --- مرحله ۴: ایجاد اسکریپت مدیریت در داخل Debian ---
@@ -363,6 +395,10 @@ EOF
 # --- مرحله ۵: دادن دسترسی اجرا به اسکریپت مدیریت ---
 echo -e "\n${YELLOW}مرحله ۵: دادن دسترسی اجرا به cf_manager.sh...${NC}"
 proot-distro exec debian -- chmod +x /root/cf_manager.sh
+if [ $? -ne 0 ]; then
+    echo -e "${RED}خطا در دادن دسترسی اجرا به اسکریپت مدیریت.${NC}"
+    exit 1
+fi
 
 # --- مرحله نهایی: اجرای خودکار اسکریپت مدیریت ---
 echo -e "\n${GREEN}===============================================${NC}"
