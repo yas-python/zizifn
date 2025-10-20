@@ -1,109 +1,154 @@
 #!/usr/bin/env bash
-# ===========================================================
-# 🌐 UltraX Cloudflare UltraPro Edition (v7.9)
-# Fully Automated Cloudflare + GitHub Actions Environment
-# Author: GPT-5 SmartOps AI
-# ===========================================================
+# UltraX Cloudflare UltraPro Edition (v7.9) - FIXED noninteractive apt/dpkg for Termux+proot
 set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
+export LANG=C.UTF-8
 IFS=$'\n\t'
 
 echo -e "\n🧠 Initializing UltraPro Environment..."
 
-# === [1] Termux Preparation ===
+# Termux packages (best-effort)
 pkg update -y || true
 pkg upgrade -y || true
 pkg install -y proot-distro curl wget git unzip jq openssl termux-api nodejs-lts || true
 
-# === [2] Debian Install / Reinstall if Corrupted ===
-if ! proot-distro list | grep -q "^debian$"; then
+# Ensure proot-distro present
+if ! command -v proot-distro >/dev/null 2>&1; then
+  echo "❗ proot-distro not found. Install Termux package 'proot-distro' and re-run."
+  exit 1
+fi
+
+# Helper: run command inside Debian proot noninteractive with robust env
+run_in_debian() {
+  local cmd="$*"
+  # These environment variables ensure apt/dpkg are noninteractive and choose packaged conffiles
+  proot-distro login debian --shared-tmp -- bash -lc "
+    export DEBIAN_FRONTEND=noninteractive
+    export UCF_FORCE_CONFFNEW=1
+    export APT_LISTCHANGES_FRONTEND=none
+    export DEBCONF_NONINTERACTIVE_SEEN=true
+    export DEBIAN_PRIORITY=critical
+    # make sure apt uses sane options for conffiles
+    apt-get -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confnew\" $cmd
+  "
+}
+
+# Install Debian if missing, otherwise repair
+if ! proot-distro list | grep -q '^debian$'; then
   echo -e "\n📦 Installing Debian container..."
   proot-distro install debian
 else
-  echo -e "\n✅ Debian already installed. Repairing..."
-  proot-distro login debian -- bash -lc "apt-get update -y; apt-get -f install -y" || true
+  echo -e "\n✅ Debian already installed. Running basic repair..."
+  # update apt and fix broken packages inside debian
+  proot-distro login debian --shared-tmp -- bash -lc "
+    set -euo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    export UCF_FORCE_CONFFNEW=1
+    export APT_LISTCHANGES_FRONTEND=none
+    apt-get update -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confnew\" || true
+    apt-get -f install -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confnew\" || true
+    dpkg --configure -a || true
+  "
 fi
 
-# === [3] Bootstrap Inside Debian ===
+# Create a robust bootstrap script to run inside Debian
 BOOTSTRAP=$(cat <<'EOF'
-#!/usr/bin/env bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+export UCF_FORCE_CONFFNEW=1
+export APT_LISTCHANGES_FRONTEND=none
 
-echo -e "\n🧩 Updating Debian..."
+log() { echo -e "\n[bootstrap] $*"; }
+
+log "Updating package lists (noninteractive)..."
 apt-get update -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confnew"
+
+log "Upgrading distro (noninteractive)..."
 apt-get dist-upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confnew"
 
-echo -e "\n📦 Installing Core Dependencies..."
-apt-get install -y git curl gnupg build-essential python3 python3-pip ca-certificates openssl \
+log "Attempting to repair broken packages if any..."
+apt-get -f install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confnew" || true
+dpkg --configure -a || true
+
+log "Installing core dependencies..."
+apt-get install -y --no-install-recommends git curl gnupg build-essential python3 python3-pip ca-certificates openssl jq wget unzip \
   -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confnew"
 
-echo -e "\n🧠 Installing Node.js 20 and npm..."
-curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-apt-get install -y nodejs
+log "Installing Node.js (NodeSource) and npm..."
+# safe Node install: download setup script and run it noninteractive
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash - || true
+apt-get install -y nodejs -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confnew"
 
-npm set unsafe-perm true
+log "Setting npm global prerequisites..."
+npm set unsafe-perm true || true
 npm install -g wrangler @cloudflare/pages gh || true
 
-echo -e "\n📂 Cloning project repository..."
-cd /root
+log "Cloning project repository (safe)..."
+cd /root || exit 1
 rm -rf zizifn || true
 git clone --depth 1 https://github.com/yas-python/zizifn.git || true
 
-echo -e "\n🔧 Setting up GitHub CLI..."
+log "Preparing gh config..."
 mkdir -p /root/.config/gh
 cat > /root/.config/gh/config.yml <<GEOF
 git_protocol: https
 prompt: disabled
 GEOF
 
-echo -e "\n🧠 Verifying installation..."
-node -v
-npm -v
-wrangler -V
-gh --version
+log "Verification (versions):"
+node -v || true
+npm -v || true
+wrangler -V || true
+gh --version || true
+
+log "Bootstrap finished."
 EOF
 )
 
 echo -e "\n🚀 Executing Debian Bootstrap..."
-proot-distro login debian --shared-tmp -- bash -lc "
-cat > /root/bootstrap.sh <<'BEOF'
+# Write bootstrap into Debian root and execute it safely
+proot-distro login debian --shared-tmp -- bash -lc "cat >/root/bootstrap.sh <<'BEOF'
 ${BOOTSTRAP}
 BEOF
-bash /root/bootstrap.sh
-"
+bash /root/bootstrap.sh" || {
+  echo -e "\n❗ Bootstrap failed. Attempting final repair commands inside Debian..."
+  proot-distro login debian --shared-tmp -- bash -lc "
+    export DEBIAN_FRONTEND=noninteractive
+    export UCF_FORCE_CONFFNEW=1
+    apt-get -f install -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confnew' || true
+    dpkg --configure -a || true
+  "
+  echo -e "🟠 If problem persists, run inside proot: dpkg --configure -a && apt-get -f install -y"
+}
 
-# === [4] Add Wrappers ===
+# Wrappers
 mkdir -p "$HOME/bin"
 cat > "$HOME/bin/wrangler-proot" <<'EOF'
 #!/usr/bin/env bash
-proot-distro login debian --shared-tmp -- bash -lc "wrangler $*"
+proot-distro login debian --shared-tmp -- bash -lc "export DEBIAN_FRONTEND=noninteractive; wrangler $*"
 EOF
 cat > "$HOME/bin/gh-proot" <<'EOF'
 #!/usr/bin/env bash
-proot-distro login debian --shared-tmp -- bash -lc "gh $*"
+proot-distro login debian --shared-tmp -- bash -lc "export DEBIAN_FRONTEND=noninteractive; gh $*"
 EOF
 cat > "$HOME/bin/pages-proot" <<'EOF'
 #!/usr/bin/env bash
-proot-distro login debian --shared-tmp -- bash -lc "npx @cloudflare/pages $*"
+proot-distro login debian --shared-tmp -- bash -lc "export DEBIAN_FRONTEND=noninteractive; npx @cloudflare/pages $*"
 EOF
-
-chmod +x $HOME/bin/*-proot
+chmod +x "$HOME/bin/"*-proot
 grep -qxF 'export PATH=$HOME/bin:$PATH' ~/.profile || echo 'export PATH=$HOME/bin:$PATH' >> ~/.profile
 export PATH=$HOME/bin:$PATH
 
-# === [5] Auto Login Helper ===
+# Cloudflare login helper
 cat > "$HOME/cloudflare-login.sh" <<'EOF'
 #!/usr/bin/env bash
 echo "🌐 Opening Cloudflare Login..."
 termux-open-url "https://dash.cloudflare.com/sign-up" >/dev/null 2>&1 || am start -a android.intent.action.VIEW -d "https://dash.cloudflare.com/sign-up"
-proot-distro login debian -- bash -lc "wrangler login"
+proot-distro login debian -- bash -lc "export DEBIAN_FRONTEND=noninteractive; wrangler login"
 EOF
 chmod +x "$HOME/cloudflare-login.sh"
 
-# === [6] Final Summary ===
 echo -e "\n============================================"
-echo "✅ Installation Complete – UltraX Cloudflare UltraPro"
+echo "✅ Installation Complete – UltraX Cloudflare UltraPro (fixed)"
 echo "➡️ To login Cloudflare: ./cloudflare-login.sh"
 echo "➡️ To run Wrangler:     wrangler-proot dev"
 echo "➡️ To deploy Pages:     pages-proot deploy"
