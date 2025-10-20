@@ -59,7 +59,8 @@ function list_all_workers() {
     
     # Parse the list of Workers
     echo "List of Workers:"
-    echo "$WORKERS_DETAILS" | jq -r '.result[] | .id' | nl -w1 -s') '
+    WORKER_LIST=$(echo "$WORKERS_DETAILS" | jq -r '.result[] | .id')
+    echo "$WORKER_LIST" | nl -w1 -s') '
 
     # Ask the user to select a Worker to get the visit link
     echo "Enter the number of the Worker to get the visit link or type 'back' to return to the main menu:"
@@ -67,7 +68,7 @@ function list_all_workers() {
 
     if [[ "$WORKER_SELECTION" =~ ^[0-9]+$ ]]; then
         # Get the Worker name based on user selection
-        SELECTED_WORKER_NAME=$(echo "$WORKERS_DETAILS" | jq -r --argjson WORKER_SELECTION "$WORKER_SELECTION" '.result[$WORKER_SELECTION - 1] | .id')
+        SELECTED_WORKER_NAME=$(echo "$WORKER_LIST" | sed -n "${WORKER_SELECTION}p")
         
         # Call the function to get the workers.dev subdomain for the selected Worker
         get_workers_dev_subdomain "$SELECTED_WORKER_NAME"
@@ -83,7 +84,7 @@ function get_workers_dev_subdomain() {
     local WORKER_NAME=$1
     # Retrieve the workers.dev subdomain for the given Worker name
     WORKER_SUBDOMAIN=$(curl -s -X GET "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/workers/subdomain" \
-        -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | jq -r '.result.subdomain')
+        -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | jq -r '.result.subdomain' 2>/dev/null)
 
     # Check if the workers.dev subdomain was retrieved successfully
     if [ -n "$WORKER_SUBDOMAIN" ]; then
@@ -106,7 +107,8 @@ function list_all_pages() {
     
     # Parse the list of Pages projects
     echo "List of Pages Projects:"
-    echo "$PAGES_DETAILS" | jq -r '.result[] | .name' | nl -w1 -s') '
+    PAGES_LIST=$(echo "$PAGES_DETAILS" | jq -r '.result[] | .name')
+    echo "$PAGES_LIST" | nl -w1 -s') '
 
     # Ask the user to select a project to get the visit link
     echo "Enter the number of the Pages project to get the visit link or type 'back' to return to the main menu:"
@@ -114,7 +116,7 @@ function list_all_pages() {
 
     if [[ "$PAGES_SELECTION" =~ ^[0-9]+$ ]]; then
         # Get the project name based on user selection
-        SELECTED_PAGES_NAME=$(echo "$PAGES_DETAILS" | jq -r --argjson PAGES_SELECTION "$PAGES_SELECTION" '.result[$PAGES_SELECTION - 1] | .name')
+        SELECTED_PAGES_NAME=$(echo "$PAGES_LIST" | sed -n "${PAGES_SELECTION}p")
         
         # Echo the pages.dev link
         echo -e "The visit link for ${GREEN}$SELECTED_PAGES_NAME${NC} is: ${GREEN}https://${SELECTED_PAGES_NAME}.pages.dev${NC}"
@@ -147,6 +149,15 @@ function create_worker() {
     echo "Please enter a name for your Cloudflare Worker:"
     read -r PROJECT_NAME
 
+    # Check if worker exists
+    WORKER_CHECK=$(curl -s -X GET "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/workers/scripts/$PROJECT_NAME" \
+        -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
+
+    if ! echo "$WORKER_CHECK" | grep -q '"success":false'; then
+        echo "Worker $PROJECT_NAME already exists."
+        return
+    fi
+
     # Ask if the user needs a KV namespace
     echo "Do you need a KV namespace? (yes/no)"
     read -r NEED_KV
@@ -170,10 +181,10 @@ function create_worker() {
             --data "{\"title\":\"$KV_NAMESPACE_NAME\"}")
 
         # Extract the KV namespace ID from the response
-        KV_ID=$(echo "$CREATE_KV_RESPONSE" | jq -r '.result.id')
+        KV_ID=$(echo "$CREATE_KV_RESPONSE" | jq -r '.result.id' 2>/dev/null)
 
         # Check if the KV namespace was created successfully
-        if [ -n "$KV_ID" ]; then
+        if [ -n "$KV_ID" ] && echo "$CREATE_KV_RESPONSE" | grep -q '"success":true'; then
             echo "KV namespace created successfully with ID: $KV_ID"
         else
             echo "Failed to create KV namespace."
@@ -206,15 +217,15 @@ function create_worker() {
             --data "{\"name\":\"$D1_NAME\"}")
 
         # Extract the D1 ID from the response
-        D1_ID=$(echo "$CREATE_D1_RESPONSE" | jq -r '.result.id')
+        D1_ID=$(echo "$CREATE_D1_RESPONSE" | jq -r '.result.id' 2>/dev/null)
 
         # Check if the D1 was created successfully
-        if [ -n "$D1_ID" ]; then
+        if [ -n "$D1_ID" ] && echo "$CREATE_D1_RESPONSE" | grep -q '"success":true'; then
             echo "D1 database created successfully with ID: $D1_ID"
             
             # Initialize the DB with the create table command
             INIT_COMMAND="CREATE TABLE IF NOT EXISTS users (uuid TEXT PRIMARY KEY, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, expiration_date TEXT NOT NULL, expiration_time TEXT NOT NULL, notes TEXT, data_limit INTEGER DEFAULT 0, data_usage INTEGER DEFAULT 0, ip_limit INTEGER DEFAULT 2);"
-            wrangler d1 execute "$D1_NAME" --command="$INIT_COMMAND"
+            wrangler d1 execute "$D1_NAME" --command="$INIT_COMMAND" --yes
             if [ $? -eq 0 ]; then
                 echo "D1 table initialized successfully."
             else
@@ -228,10 +239,15 @@ function create_worker() {
     fi
 
     # Generate the worker directory
-    wrangler generate "$PROJECT_NAME"
+    wrangler generate "$PROJECT_NAME" --quiet
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to generate worker directory."
+        return
+    fi
 
     # Change to the worker directory
-    cd "$PROJECT_NAME" || { echo "Failed to change directory to $PROJECT_NAME"; exit 1; }
+    cd "$PROJECT_NAME" || { echo "Failed to change directory to $PROJECT_NAME"; return; }
 
     # Add account_id to wrangler.toml
     echo "account_id = \"$ACCOUNT_ID\"" >> wrangler.toml
@@ -259,6 +275,7 @@ function create_worker() {
         curl -s "$SCRIPT_URL" -o src/index.js
         if [ $? -ne 0 ]; then
             echo "Failed to download the new script content."
+            cd ..
             return
         fi
         echo "New script content downloaded successfully to src/index.js."
@@ -270,10 +287,14 @@ function create_worker() {
 
     if [ "$CHANGE_UUID" == "yes" ]; then
         # Generate a random UUID
-        NEW_UUID=$(uuidgen | tr 'A-F' 'a-f')
+        if command -v uuidgen &> /dev/null; then
+            NEW_UUID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+        else
+            NEW_UUID=$(cat /proc/sys/kernel/random/uuid)
+        fi
 
-        # Replace UUID in the script (assuming it's a standard format)
-        sed -i '' "s/[0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}/$NEW_UUID/g" src/index.js
+        # Replace UUID in the script using cross-platform sed
+        sed -i.bak "s/[0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}/$NEW_UUID/g" src/index.js && rm -f src/index.js.bak
 
         echo "UUID has been changed to: $NEW_UUID"
     fi
@@ -288,7 +309,7 @@ function create_worker() {
 
         for SECRET in "${SECRETS[@]}"; do
             echo "Enter value for $SECRET (or leave blank to skip):"
-            read -r SECRET_VALUE
+            read -rs SECRET_VALUE  # Use -s for secure input if sensitive
             if [ -n "$SECRET_VALUE" ]; then
                 echo "$SECRET_VALUE" | wrangler secret put "$SECRET"
                 if [ $? -ne 0 ]; then
@@ -301,7 +322,7 @@ function create_worker() {
     fi
 
     # Deploy the worker
-    DEPLOY_RESPONSE=$(wrangler deploy)
+    DEPLOY_RESPONSE=$(wrangler deploy 2>&1)
     if [ $? -eq 0 ]; then
         echo "Worker deployed successfully."
         # Show the visit link
@@ -331,7 +352,7 @@ function create_pages() {
         -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
 
     if echo "$PAGES_CHECK" | grep -q '"success":true'; then
-        echo "Pages project $PROJECT_NAME already exists."
+        echo "Pages project $PROJECT_NAME already exists. Proceeding to update."
     else
         # Create the Pages project
         wrangler pages project create "$PROJECT_NAME" --production-branch main
@@ -361,9 +382,9 @@ function create_pages() {
             -H "Content-Type: application/json" \
             --data "{\"title\":\"$KV_NAMESPACE_NAME\"}")
 
-        KV_ID=$(echo "$CREATE_KV_RESPONSE" | jq -r '.result.id')
+        KV_ID=$(echo "$CREATE_KV_RESPONSE" | jq -r '.result.id' 2>/dev/null)
 
-        if [ -n "$KV_ID" ]; then
+        if [ -n "$KV_ID" ] && echo "$CREATE_KV_RESPONSE" | grep -q '"success":true'; then
             echo "KV namespace created successfully with ID: $KV_ID"
         else
             echo "Failed to create KV namespace."
@@ -390,13 +411,13 @@ function create_pages() {
             -H "Content-Type: application/json" \
             --data "{\"name\":\"$D1_NAME\"}")
 
-        D1_ID=$(echo "$CREATE_D1_RESPONSE" | jq -r '.result.id')
+        D1_ID=$(echo "$CREATE_D1_RESPONSE" | jq -r '.result.id' 2>/dev/null)
 
-        if [ -n "$D1_ID" ]; then
+        if [ -n "$D1_ID" ] && echo "$CREATE_D1_RESPONSE" | grep -q '"success":true'; then
             echo "D1 database created successfully with ID: $D1_ID"
 
             INIT_COMMAND="CREATE TABLE IF NOT EXISTS users (uuid TEXT PRIMARY KEY, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, expiration_date TEXT NOT NULL, expiration_time TEXT NOT NULL, notes TEXT, data_limit INTEGER DEFAULT 0, data_usage INTEGER DEFAULT 0, ip_limit INTEGER DEFAULT 2);"
-            wrangler d1 execute "$D1_NAME" --command="$INIT_COMMAND"
+            wrangler d1 execute "$D1_NAME" --command="$INIT_COMMAND" --yes
             if [ $? -eq 0 ]; then
                 echo "D1 table initialized successfully."
             else
@@ -408,13 +429,12 @@ function create_pages() {
         fi
     fi
 
-    # Create a directory for the Pages project
-    mkdir "$PROJECT_NAME"
-    cd "$PROJECT_NAME" || { echo "Failed to change directory to $PROJECT_NAME"; exit 1; }
+    # Create a directory for the Pages project if not exists
+    mkdir -p "$PROJECT_NAME"
+    cd "$PROJECT_NAME" || { echo "Failed to change directory to $PROJECT_NAME"; return; }
 
-    # Create wrangler.toml
-    touch wrangler.toml
-    echo "name = \"$PROJECT_NAME\"" >> wrangler.toml
+    # Create or update wrangler.toml
+    echo "name = \"$PROJECT_NAME\"" > wrangler.toml
     echo "account_id = \"$ACCOUNT_ID\"" >> wrangler.toml
     echo "compatibility_date = \"$(date +%Y-%m-%d)\"" >> wrangler.toml
 
@@ -440,6 +460,7 @@ function create_pages() {
         curl -s "$SCRIPT_URL" -o _worker.js
         if [ $? -ne 0 ]; then
             echo "Failed to download the script content."
+            cd ..
             return
         fi
         echo "Script content downloaded successfully to _worker.js."
@@ -450,8 +471,12 @@ function create_pages() {
     read -r CHANGE_UUID
 
     if [ "$CHANGE_UUID" == "yes" ]; then
-        NEW_UUID=$(uuidgen | tr 'A-F' 'a-f')
-        sed -i '' "s/[0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}/$NEW_UUID/g" _worker.js
+        if command -v uuidgen &> /dev/null; then
+            NEW_UUID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+        else
+            NEW_UUID=$(cat /proc/sys/kernel/random/uuid)
+        fi
+        sed -i.bak "s/[0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}/$NEW_UUID/g" _worker.js && rm -f _worker.js.bak
         echo "UUID has been changed to: $NEW_UUID"
     fi
 
@@ -464,9 +489,9 @@ function create_pages() {
 
         for SECRET in "${SECRETS[@]}"; do
             echo "Enter value for $SECRET (or leave blank to skip):"
-            read -r SECRET_VALUE
+            read -rs SECRET_VALUE
             if [ -n "$SECRET_VALUE" ]; then
-                echo "$SECRET_VALUE" | wrangler secret put "$SECRET" --project-name "$PROJECT_NAME"
+                echo "$SECRET_VALUE" | wrangler pages secret put "$SECRET" --project-name "$PROJECT_NAME"
                 if [ $? -ne 0 ]; then
                     echo "Failed to set secret $SECRET."
                 else
@@ -477,7 +502,7 @@ function create_pages() {
     fi
 
     # Deploy the pages project
-    DEPLOY_RESPONSE=$(wrangler pages deploy . --project-name "$PROJECT_NAME")
+    DEPLOY_RESPONSE=$(wrangler pages deploy . --project-name "$PROJECT_NAME" 2>&1)
     if [ $? -eq 0 ]; then
         echo "Pages project deployed successfully."
         echo -e "The visit link is: ${GREEN}https://${PROJECT_NAME}.pages.dev${NC}"
@@ -532,11 +557,29 @@ function delete_pages() {
 
 # Main script logic
 echo "Please enter your Cloudflare API token:"
-read -r CLOUDFLARE_API_TOKEN
+read -rs CLOUDFLARE_API_TOKEN  # Secure input
 export CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN"
 echo "Please enter your Cloudflare Account ID:"
 read -r ACCOUNT_ID
-export CLOUDFLARE_ACCOUNT_ID="$ACCOUNT_ID"  # For wrangler if needed
+export CLOUDFLARE_ACCOUNT_ID="$ACCOUNT_ID"
+
+# Check if jq is installed
+if ! command -v jq &> /dev/null; then
+    echo "jq is not installed. Please install jq to parse JSON responses."
+    exit 1
+fi
+
+# Check if wrangler is installed
+if ! command -v wrangler &> /dev/null; then
+    echo "wrangler is not installed. Please install wrangler CLI."
+    exit 1
+fi
+
+# Check if curl is installed
+if ! command -v curl &> /dev/null; then
+    echo "curl is not installed. Please install curl."
+    exit 1
+fi
 
 # Loop to show the menu repeatedly
 while true; do
