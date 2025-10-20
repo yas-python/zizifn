@@ -2,10 +2,7 @@
 
 #=================================================================================
 # نصب‌کننده و اجراکننده خودکار مدیریت Cloudflare (نسخه اصلاح‌شده و هوشمند)
-# این اسکریپت در Termux اجرا می‌شود.
-# 1. Debian را نصب می‌کند.
-# 2. پیش‌نیازها را در Debian نصب می‌کند. (به صورت کاملاً غیر-تعاملی)
-# 3. اسکریپت مدیریت را ساخته و اجرا می‌کند.
+# نسخه ۲.۰.۰ - رفع خطای "unknown command 'exec'" با جایگزینی "login"
 #=================================================================================
 
 # کدهای رنگی ANSI
@@ -54,24 +51,26 @@ echo -e "${GREEN}Debian با موفقیت نصب شد.${NC}"
 # --- مرحله ۳: نصب پیش‌نیازها در داخل Debian (اصلاح‌شده برای اجرای تماماً خودکار و عیب‌یابی بهتر) ---
 echo -e "\n${YELLOW}مرحله ۳: نصب پیش‌نیازها (apt, npm, wrangler) در داخل Debian...${NC}"
 
-# اجرای دستورات نصب در داخل دبیان با proot-distro exec
-# استفاده از export DEBIAN_FRONTEND=noninteractive برای جلوگیری از هنگ کردن apt
+#
+# ===== شروع تغییرات کلیدی =====
+# استفاده از 'proot-distro login' به جای 'exec' برای سازگاری با نسخه‌های قدیمی‌تر
+#
 echo -e "${YELLOW}... در حال به‌روزرسانی apt در Debian...${NC}"
-proot-distro exec debian -- bash -c "export DEBIAN_FRONTEND=noninteractive && apt update -y"
+proot-distro login debian -- bash -c "export DEBIAN_FRONTEND=noninteractive && apt update -y"
 if [ $? -ne 0 ]; then
     echo -e "${RED}خطا در apt update داخل Debian.${NC}"
     exit 1
 fi
 
 echo -e "${YELLOW}... در حال ارتقاء پکیج‌ها در Debian...${NC}"
-proot-distro exec debian -- bash -c "export DEBIAN_FRONTEND=noninteractive && apt upgrade -y -o Dpkg::Options::=\"--force-confnew\""
+proot-distro login debian -- bash -c "export DEBIAN_FRONTEND=noninteractive && apt upgrade -y -o Dpkg::Options::=\"--force-confnew\""
 if [ $? -ne 0 ]; then
     echo -e "${RED}خطا در apt upgrade داخل Debian.${NC}"
     exit 1
 fi
 
 echo -e "${YELLOW}... در حال نصب curl, jq, nodejs, npm در Debian...${NC}"
-proot-distro exec debian -- bash -c "export DEBIAN_FRONTEND=noninteractive && apt install -y curl jq nodejs npm"
+proot-distro login debian -- bash -c "export DEBIAN_FRONTEND=noninteractive && apt install -y curl jq nodejs npm"
 if [ $? -ne 0 ]; then
     echo -e "${RED}خطا در نصب پکیج‌های apt داخل Debian.${NC}"
     exit 1
@@ -79,7 +78,7 @@ fi
 
 echo -e "${YELLOW}... در حال نصب wrangler با npm...${NC}"
 # اجرای npm install به صورت جداگانه
-proot-distro exec debian -- npm install -g wrangler
+proot-distro login debian -- bash -c "npm install -g wrangler"
 if [ $? -ne 0 ]; then
     echo -e "${RED}خطا در نصب wrangler. لطفاً بررسی کنید.${NC}"
     exit 1
@@ -91,7 +90,7 @@ echo -e "${GREEN}تمام پیش‌نیازهای Debian با موفقیت نص�
 echo -e "\n${YELLOW}مرحله ۴: در حال ساخت اسکریپت مدیریت (cf_manager.sh) در داخل Debian...${NC}"
 
 # استفاده از Heredoc برای نوشتن اسکریپت مدیریت در مسیر /root/cf_manager.sh در دبیان
-proot-distro exec debian -- bash -c "cat << 'EOF' > /root/cf_manager.sh
+proot-distro login debian -- bash -c "cat << 'EOF' > /root/cf_manager.sh
 #!/bin/bash
 #=================================================================================
 # اسکریپت مدیریت پیشرفته Cloudflare
@@ -391,10 +390,11 @@ done
 EOF
 "
 # پایان Heredoc
+# ===== پایان تغییرات کلیدی =====
 
 # --- مرحله ۵: دادن دسترسی اجرا به اسکریپت مدیریت ---
 echo -e "\n${YELLOW}مرحله ۵: دادن دسترسی اجرا به cf_manager.sh...${NC}"
-proot-distro exec debian -- chmod +x /root/cf_manager.sh
+proot-distro login debian -- chmod +x /root/cf_manager.sh
 if [ $? -ne 0 ]; then
     echo -e "${RED}خطا در دادن دسترسی اجرا به اسکریپت مدیریت.${NC}"
     exit 1
@@ -408,4 +408,4 @@ sleep 1
 
 # اجرای اسکریپت مدیریت که در داخل دبیان ساخته شد
 # این دستور شما را مستقیماً به بخش احراز هویت و منوی اصلی می‌برد
-proot-distro exec debian -- bash /root/cf_manager.sh
+proot-distro login debian -- bash /root/cf_manager.sh
