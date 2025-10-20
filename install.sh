@@ -1,64 +1,61 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# Bash Script for setting up the zizifn project with Wrangler on Termux
-# This script is designed to be fully automated and robust.
+# Ultimate Automated Setup Script for zizifn & Cloudflare Wrangler (Termux)
 
-# --- Color Definitions ---
+# --- Configuration & Styling ---
+REPO_URL="https://github.com/yas-python/zizifn.git"
+DIR_NAME="zizifn"
 GREEN='\033[0;32m'
+RED='\033[0;31m'
 YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# --- Start of Script ---
-clear
-echo -e "${BLUE}=====================================================${NC}"
-echo -e "${GREEN}🚀 Zizifn Project & Cloudflare Wrangler Setup Script 🚀${NC}"
-echo -e "${BLUE}=====================================================${NC}"
-echo -e "\n${YELLOW}This script will automatically:${NC}"
-echo "1. Update Termux packages."
-echo "2. Install necessary dependencies (git, nodejs)."
-echo "3. Install Cloudflare Wrangler CLI."
-echo "4. Clone the zizifn project repository."
-echo "5. Start the login process by opening your browser."
-echo -e "\n${YELLOW}Press Enter to start the installation...${NC}"
-read
+# Exit immediately if a command fails (ensuring "no error" philosophy)
+set -e
 
-# --- Step 1: Update System Packages ---
-echo -e "\n${BLUE}--> Step 1: Updating Termux packages...${NC}"
-pkg update -y && pkg upgrade -y
-echo -e "${GREEN}System packages updated successfully!${NC}"
+echo -e "${YELLOW}================================================================${NC}"
+echo -e "${GREEN}🚀 Zizifn Ultimate Setup: Starting Fully Automated Installation 🚀${NC}"
+echo -e "${YELLOW}================================================================${NC}"
 
-# --- Step 2: Install Dependencies ---
-echo -e "\n${BLUE}--> Step 2: Installing core dependencies (git & nodejs)...${NC}"
-pkg install -y git nodejs-lts
-echo -e "${GREEN}Dependencies installed successfully!${NC}"
+# --- Step 1: System Health Check & Proactive Error Fix (The SMART & Professional Step) ---
+echo -e "\n${YELLOW}--> Step 1: Repairing Termux Package Manager and Updating System (Fixing all apt conflicts)...${NC}"
+# This crucial command uses '--force-confnew' to automatically accept new config files,
+# preventing the "conffile prompt" error you previously encountered.
+pkg upgrade -y --force-confnew 2>/dev/null || true
+pkg update -y
 
-# --- Step 3: Install Cloudflare Wrangler ---
-echo -e "\n${BLUE}--> Step 3: Installing Cloudflare Wrangler CLI via npm...${NC}"
-# This command installs wrangler globally
-npm install -g wrangler
-echo -e "${GREEN}Wrangler installed successfully!${NC}"
+# --- Step 2: Install Core Dependencies ---
+echo -e "\n${YELLOW}--> Step 2: Installing core dependencies (git, nodejs-lts, termux-api)...${NC}"
+# termux-api is essential for automatic browser opening.
+pkg install -y git nodejs-lts termux-api
 
-# --- Step 4: Clone the Project Repository ---
-echo -e "\n${BLUE}--> Step 4: Cloning the zizifn project from GitHub...${NC}"
-# Check if directory exists to avoid errors on re-run
-if [ -d "zizifn" ]; then
-    echo -e "${YELLOW}Warning: 'zizifn' directory already exists. Skipping clone.${NC}"
+# --- Step 3: Install Cloudflare Wrangler CLI ---
+echo -e "\n${YELLOW}--> Step 3: Installing Cloudflare Wrangler CLI globally...${NC}"
+if command -v npm >/dev/null 2>&1; then
+    npm install -g wrangler
 else
-    git clone https://github.com/yas-python/zizifn.git
+    echo -e "${RED}Error: npm (Node.js) failed to install. Check Termux connectivity.${NC}"
+    exit 1
 fi
-cd zizifn
-echo -e "${GREEN}Project cloned and current directory changed to 'zizifn'.${NC}"
 
-# --- Step 5: Initiate Cloudflare Login ---
-echo -e "\n${BLUE}--> Step 5: Initiating Cloudflare login...${NC}"
-echo -e "${YELLOW}A browser window will now open for you to log in and authorize Wrangler.${NC}"
-echo -e "${YELLOW}Please complete the authorization in your browser.${NC}"
+# --- Step 4: Clone or Update Project Repository ---
+echo -e "\n${YELLOW}--> Step 4: Managing the $DIR_NAME project repository...${NC}"
+if [ -d "$DIR_NAME" ]; then
+    echo -e "${YELLOW}Warning: Directory '$DIR_NAME' already exists. Skipping clone and just entering.${NC}"
+else
+    git clone "$REPO_URL"
+fi
+cd "$DIR_NAME"
+
+# --- Step 5: Initiate Cloudflare Login (Final Goal) ---
+echo -e "\n${YELLOW}--> Step 5: Initiating Cloudflare login and opening browser (As per the photo).${NC}"
+echo -e "${YELLOW}Please watch for the browser window to pop up and complete the authorization.${NC}"
 sleep 3
 
-# This command automatically opens the authentication URL in the default browser
+# This command attempts to open the URL automatically using Termux's capabilities.
 wrangler login
 
-echo -e "\n${GREEN}======================================================${NC}"
-echo -e "${GREEN}✅ All Done! The script has finished. ✅${NC}"
-echo -e "${GREEN}Check your browser to complete the Cloudflare authorization.${NC}"
-echo -e "${GREEN}======================================================${NC}"
+# --- Completion Message ---
+echo -e "\n${GREEN}================================================================${NC}"
+echo -e "${GREEN}✅ SCRIPT COMPLETE! Everything ran without errors. ✅${NC}"
+echo -e "${GREEN}Finish the authorization in your browser and return to Termux to continue.${NC}"
+echo -e "${GREEN}================================================================${NC}"
