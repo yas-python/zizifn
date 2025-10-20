@@ -17,40 +17,23 @@ if ! command -v proot-distro >/dev/null 2>&1; then
   exit 1
 fi
 
-# Helper: run command inside Debian proot noninteractive with robust env
-run_in_debian() {
-  local cmd="$*"
-  # These environment variables ensure apt/dpkg are noninteractive and choose packaged conffiles
-  proot-distro login debian --shared-tmp -- bash -lc "
-    export DEBIAN_FRONTEND=noninteractive
-    export UCF_FORCE_CONFFNEW=1
-    export APT_LISTCHANGES_FRONTEND=none
-    export DEBCONF_NONINTERACTIVE_SEEN=true
-    export DEBIAN_PRIORITY=critical
-    # make sure apt uses sane options for conffiles
-    apt-get -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confnew\" $cmd
-  "
-}
-
-# Install Debian if missing, otherwise repair
+# Install Debian if missing, otherwise attempt repair
 if ! proot-distro list | grep -q '^debian$'; then
   echo -e "\n📦 Installing Debian container..."
   proot-distro install debian
 else
   echo -e "\n✅ Debian already installed. Running basic repair..."
-  # update apt and fix broken packages inside debian
   proot-distro login debian --shared-tmp -- bash -lc "
     set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
     export UCF_FORCE_CONFFNEW=1
-    export APT_LISTCHANGES_FRONTEND=none
-    apt-get update -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confnew\" || true
-    apt-get -f install -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confnew\" || true
+    apt-get update -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confnew' || true
+    apt-get -f install -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confnew' || true
     dpkg --configure -a || true
   "
 fi
 
-# Create a robust bootstrap script to run inside Debian
+# Create bootstrap script content (runs inside Debian)
 BOOTSTRAP=$(cat <<'EOF'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -74,7 +57,6 @@ apt-get install -y --no-install-recommends git curl gnupg build-essential python
   -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confnew"
 
 log "Installing Node.js (NodeSource) and npm..."
-# safe Node install: download setup script and run it noninteractive
 curl -fsSL https://deb.nodesource.com/setup_20.x | bash - || true
 apt-get install -y nodejs -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confnew"
 
@@ -105,7 +87,7 @@ EOF
 )
 
 echo -e "\n🚀 Executing Debian Bootstrap..."
-# Write bootstrap into Debian root and execute it safely
+# Write and run bootstrap inside Debian
 proot-distro login debian --shared-tmp -- bash -lc "cat >/root/bootstrap.sh <<'BEOF'
 ${BOOTSTRAP}
 BEOF
