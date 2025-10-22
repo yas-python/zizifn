@@ -557,6 +557,7 @@ async function checkAdminAuth(request, env, cfg) {
   return { isAdmin: true, errorResponse: null, csrfToken };
 }
 
+// --- START: MODIFIED FUNCTION ---
 /**
 * Handles a robust catch for API endpoints.
 * @param {any} e The caught error.
@@ -564,38 +565,55 @@ async function checkAdminAuth(request, env, cfg) {
 * @returns {Response} A JSON error response.
 */
 function handleApiError(e, context = '') {
-  console.error(`API Error${context ? ` (${context})` : ''}:`, e);
-  let errorMsg = 'An unexpected error occurred.';
+  // Log the full error object for debugging in the worker console
+  console.error(`API Error${context ? ` (${context})` : ''}:`, JSON.stringify(e, null, 2));
+  
+  let errorMsg = 'An unexpected error occurred. Check worker logs for details.';
 
   if (e instanceof Error) {
+    // Standard JavaScript Error
     errorMsg = e.message;
   } else if (typeof e === 'string') {
+    // Error was thrown as a simple string
     errorMsg = e;
+  } else if (typeof e === 'object' && e !== null && e.message) {
+    // Handle D1 error objects (which are not `instanceof Error`)
+    // e.g., { message: "...", cause: { ... } }
+    errorMsg = String(e.message); 
+    if (e.cause?.message) {
+        errorMsg += `: ${e.cause.message}`;
+    }
   } else {
-    // Log the unknown error structure
-    console.error("Unknown error type caught:", e);
+    try {
+        // Try to stringify unknown error types
+        const errStr = JSON.stringify(e);
+        if (errStr !== '{}') { // Avoid empty object string
+            errorMsg = errStr;
+        }
+    } catch (_) {
+        // Stringify failed (e.g., circular reference), use default message
+    }
   }
 
-  // Check for specific, user-friendly messages
-  if (typeof errorMsg === 'string') {
-    if (errorMsg.includes('UNIQUE constraint failed')) {
-      errorMsg = 'UUID already exists.';
-    } else if (errorMsg.includes('not iterable')) {
-      // Provide a more helpful message for the known D1 bug
-      errorMsg = 'Database binding error. Check worker logs.';
-    }
+  // Now check the *extracted* error message for user-friendly text
+  if (errorMsg.includes('UNIQUE constraint failed')) {
+    errorMsg = 'UUID already exists.';
+  } else if (errorMsg.includes('not iterable')) {
+    errorMsg = 'Database binding error: "(intermediate value) is not iterable". This is a known D1 issue when a value is "undefined". The code includes fixes for this, but it may still be occurring. Please check worker logs.';
   }
   
   return new Response(JSON.stringify({ error: errorMsg }), {
-    status: 400, // Use 400 for client errors, 500 for true server errors
+    status: 400, // 400 Bad Request is often more appropriate for API errors than 500
     headers: { 'Content-Type': 'application/json' }
   });
 }
+// --- END: MODIFIED FUNCTION ---
+
 
 /**
 * Handles all incoming requests to /admin/* routes.
 * @param {Request} request
-* @param {object} env
+** @param {object} env
 * @param {object} cfg
 * @param {object} ctx - Execution context for non-blocking ops.
 * @returns {Promise<Response>}
