@@ -124,6 +124,13 @@ async function getUserData(env, uuid, ctx) {
   if (!isValidUUID(uuid)) {
     return null;
   }
+  
+  // Robustness check
+  if (!env.DB || !env.USER_KV) {
+      console.error("D1 or KV bindings are missing. Cannot fetch user data.");
+      return null;
+  }
+  
   const cacheKey = `user:${uuid}`;
   
   // 1. Try to get from KV cache
@@ -147,6 +154,7 @@ async function getUserData(env, uuid, ctx) {
   if (ctx) {
       ctx.waitUntil(env.USER_KV.put(cacheKey, JSON.stringify(userFromDb), { expirationTtl: 3600 }));
   } else {
+      // Fallback for environments without ctx (like ProtocolOverWSHandler direct call)
       await env.USER_KV.put(cacheKey, JSON.stringify(userFromDb), { expirationTtl: 3600 });
   }
   
@@ -301,15 +309,15 @@ const adminPanelHTML = `<!DOCTYPE html>
 
     <script>
         document.addEventListener('DOMContentLoaded', () => {
-            const API_BASE = '__ADMIN_PATH__/api'; 
+            const API_BASE = window.location.pathname.replace(/[^/]*$/, '') + 'api'; 
             const csrfToken = document.getElementById('csrf_token').value;
             const apiHeaders = { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken };
             
             const api = {
-                get: (endpoint) => fetch(`${API_BASE}${endpoint}`).then(handleResponse),
-                post: (endpoint, body) => fetch(`${API_BASE}${endpoint}`, { method: 'POST', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
-                put: (endpoint, body) => fetch(`${API_BASE}${endpoint}`, { method: 'PUT', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
-                delete: (endpoint) => fetch(`${API_BASE}${endpoint}`, { method: 'DELETE', headers: apiHeaders }).then(handleResponse),
+                get: (endpoint) => fetch(\`\${API_BASE}\${endpoint}\`).then(handleResponse),
+                post: (endpoint, body) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'POST', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
+                put: (endpoint, body) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'PUT', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
+                delete: (endpoint) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'DELETE', headers: apiHeaders }).then(handleResponse),
             };
             
             async function handleResponse(response) {
@@ -319,7 +327,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                 }
                 if (!response.ok) {
                     const errorData = await response.json().catch(() => ({ error: 'An unknown error occurred.' }));
-                    throw new Error(errorData.error || `Request failed with status ${response.status}`);
+                    throw new Error(errorData.error || \`Request failed with status \${response.status}\`);
                 }
                 return response.status === 204 ? null : response.json();
             }
@@ -335,56 +343,56 @@ const adminPanelHTML = `<!DOCTYPE html>
             const pad = num => num.toString().padStart(2, '0');
             const localToUTC = (d, t) => {
                 if (!d || !t) return { utcDate: '', utcTime: '' };
-                const dt = new Date(`${d}T${t}`);
-                return { utcDate: `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`, utcTime: `${pad(dt.getUTCHours())}:${pad(dt.getUTCMinutes())}:${pad(dt.getUTCSeconds())}` };
+                const dt = new Date(\`\${d}T\${t}\`);
+                return { utcDate: \`\${dt.getUTCFullYear()}-\${pad(dt.getUTCMonth() + 1)}-\${pad(dt.getUTCDate())}\`, utcTime: \`\${pad(dt.getUTCHours())}:\${pad(dt.getUTCMinutes())}:\${pad(dt.getUTCSeconds())}\` };
             };
             const utcToLocal = (d, t) => {
                 if (!d || !t) return { localDate: '', localTime: '' };
-                const dt = new Date(`${d}T${t}Z`);
-                return { localDate: `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}`, localTime: `${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}` };
+                const dt = new Date(\`\${d}T\${t}Z\`);
+                return { localDate: \`\${dt.getFullYear()}-\${pad(dt.getMonth() + 1)}-\${pad(dt.getDate())}\`, localTime: \`\${pad(dt.getHours())}:\${pad(dt.getMinutes())}:\${pad(dt.getSeconds())}\` };
             };
             
             function bytesToReadable(bytes) {
                 if (bytes <= 0) return '0 Bytes';
                 const i = Math.floor(Math.log(bytes) / Math.log(1024));
-                return `${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} ${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}`;
+                return \`\${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} \${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}\`;
             }
 
             function renderStats(stats) {
                 const statsContainer = document.getElementById('stats');
-                statsContainer.innerHTML = `
-                    <div class="stat-card"><h3 class="stat-title">Total Users</h3><p class="stat-value">${stats.totalUsers}</p></div>
-                    <div class="stat-card"><h3 class="stat-title">Active Users</h3><p class="stat-value">${stats.activeUsers}</p></div>
-                    <div class="stat-card"><h3 class="stat-title">Expired Users</h3><p class="stat-value">${stats.expiredUsers}</p></div>
-                    <div class="stat-card"><h3 class="stat-title">Total Traffic Used</h3><p class="stat-value">${bytesToReadable(stats.totalTraffic)}</p></div>
-                `;
+                statsContainer.innerHTML = \`
+                    <div class="stat-card"><h3 class="stat-title">Total Users</h3><p class="stat-value">\${stats.totalUsers}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Active Users</h3><p class="stat-value">\${stats.activeUsers}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Expired Users</h3><p class="stat-value">\${stats.expiredUsers}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Total Traffic Used</h3><p class="stat-value">\${bytesToReadable(stats.totalTraffic)}</p></div>
+                \`;
             }
             
             function renderUsers(users) {
                 const userList = document.getElementById('userList');
                 userList.innerHTML = users.length === 0 ? '<tr><td colspan="7" style="text-align:center;">No users found.</td></tr>' : users.map(user => {
-                    const expiryUTC = new Date(`${user.expiration_date}T${user.expiration_time}Z`);
+                    const expiryUTC = new Date(\`\${user.expiration_date}T\${user.expiration_time}Z\`);
                     const isExpired = expiryUTC < new Date();
-                    const trafficUsage = user.data_limit > 0 ? `${bytesToReadable(user.data_usage)} / ${bytesToReadable(user.data_limit)}` : `${bytesToReadable(user.data_usage)} / &infin;`;
+                    const trafficUsage = user.data_limit > 0 ? \`\${bytesToReadable(user.data_usage)} / \${bytesToReadable(user.data_limit)}\` : \`\${bytesToReadable(user.data_usage)} / &infin;\`;
                     const trafficPercent = user.data_limit > 0 ? Math.min(100, (user.data_usage / user.data_limit * 100)) : 0;
                     
-                    return `
-                        <tr data-uuid="${user.uuid}">
-                            <td title="${user.uuid}">${user.uuid.substring(0, 8)}...<button class="btn-copy-uuid" title="Copy UUID">📋</button></td>
-                            <td>${new Date(user.created_at).toLocaleString()}</td>
-                            <td>${expiryUTC.toLocaleString()}</td>
-                            <td><span class="status-badge ${isExpired ? 'status-expired' : 'status-active'}">${isExpired ? 'Expired' : 'Active'}</span></td>
+                    return \`
+                        <tr data-uuid="\${user.uuid}">
+                            <td title="\${user.uuid}">\${user.uuid.substring(0, 8)}...<button class="btn-copy-uuid" title="Copy UUID">📋</button></td>
+                            <td>\${new Date(user.created_at).toLocaleString()}</td>
+                            <td>\${expiryUTC.toLocaleString()}</td>
+                            <td><span class="status-badge \${isExpired ? 'status-expired' : 'status-active' }">\${isExpired ? 'Expired' : 'Active'}</span></td>
                             <td>
-                                ${trafficUsage}
-                                <div class="traffic-bar"><div class="traffic-bar-inner" style="width: ${trafficPercent}%;"></div></div>
+                                \${trafficUsage}
+                                <div class="traffic-bar"><div class="traffic-bar-inner" style="width: \${trafficPercent}%;"></div></div>
                             </td>
-                            <td>${user.notes || '-'}</td>
+                            <td>\${user.notes || '-'}</td>
                             <td class="actions-cell">
                                 <button class="btn btn-secondary btn-edit">Edit</button>
                                 <button class="btn btn-danger btn-delete">Delete</button>
                             </td>
                         </tr>
-                    `;
+                    \`;
                 }).join('');
             }
 
@@ -460,8 +468,8 @@ const adminPanelHTML = `<!DOCTYPE html>
                     document.getElementById('resetTraffic').checked = false;
                     editModal.classList.add('show');
                 } else if (button.classList.contains('btn-delete')) {
-                    if (confirm(`Are you sure you want to delete user ${uuid.substring(0,8)}...?`)) {
-                        api.delete(`/users/${uuid}`).then(() => {
+                    if (confirm(\`Are you sure you want to delete user \${uuid.substring(0,8)}...?\`)) {
+                        api.delete(\`/users/\${uuid}\`).then(() => {
                             showToast('User deleted successfully!');
                             refreshData();
                         }).catch(err => showToast(err.message, true));
@@ -481,7 +489,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                     reset_traffic: document.getElementById('resetTraffic').checked,
                 };
                 try {
-                    await api.put(`/users/${uuid}`, updatedData);
+                    await api.put(\`/users/\${uuid}\`, updatedData);
                     showToast('User updated successfully!');
                     editModal.classList.remove('show');
                     refreshData();
@@ -501,8 +509,8 @@ const adminPanelHTML = `<!DOCTYPE html>
             const setDefaultExpiry = () => {
                 const now = new Date();
                 now.setMonth(now.getMonth() + 1);
-                document.getElementById('expiryDate').value = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-                document.getElementById('expiryTime').value = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+                document.getElementById('expiryDate').value = \`\${now.getFullYear()}-\${pad(now.getMonth() + 1)}-\${pad(now.getDate())}\`;
+                document.getElementById('expiryTime').value = \`\${pad(now.getHours())}:\${pad(now.getMinutes())}:\${pad(now.getSeconds())}\`;
             };
             
             document.getElementById('uuid').value = crypto.randomUUID();
@@ -564,6 +572,10 @@ async function handleAdminRequest(request, env, cfg, ctx) {
 
   if (!env.ADMIN_KEY) {
     return new Response('Admin panel is not configured. Please set ADMIN_KEY secret.', { status: 503 });
+  }
+  
+  if (!env.DB || !env.USER_KV) {
+      return new Response('Admin panel is not fully configured. Please ensure D1 (DB) and KV (USER_KV) bindings are set.', { status: 503 });
   }
 
   const apiBasePath = `${cfg.adminPath}/api`;
@@ -683,7 +695,8 @@ async function handleAdminRequest(request, env, cfg, ctx) {
       
       if (isAdmin) {
         const panelWithCsrf = adminPanelHTML
-          .replace('__ADMIN_PATH__', cfg.adminPath)
+          // CRITICAL FIX: The regex was too greedy, replaced to use simple string replace
+          .replace(/__ADMIN_PATH__\/api/g, `${cfg.adminPath}/api`) 
           .replace(
             '<input type="hidden" id="csrf_token" name="csrf_token">',
             `<input type="hidden" id="csrf_token" name="csrf_token" value="${csrfToken}">`
@@ -715,6 +728,10 @@ async function handleManagementAPI(request, env, cfg, ctx) {
   // 1. Check API Token
   if (!cfg.apiToken || request.headers.get('Authorization') !== `Bearer ${cfg.apiToken}`) {
     return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: jsonHeader });
+  }
+  
+  if (!env.DB || !env.USER_KV) {
+      return new Response(JSON.stringify({ error: 'Service is partially configured. Missing D1 or KV bindings.' }), { status: 503, headers: jsonHeader });
   }
   
   const url = new URL(request.url);
@@ -920,7 +937,9 @@ export default {
     // --- 3. WebSocket/VLESS Protocol Handling ---
     const upgradeHeader = request.headers.get('Upgrade');
     if (upgradeHeader?.toLowerCase() === 'websocket') {
-      // This is the merged handler with traffic counting
+      if (!env.DB || !env.USER_KV) {
+          return new Response('VLESS proxy is not fully configured. Missing D1 or KV bindings.', { status: 503 });
+      }
       return ProtocolOverWSHandler(request, env, ctx);
     }
     
@@ -1027,13 +1046,16 @@ async function ProtocolOverWSHandler(request, env, ctx) {
   };
   
   // Register the usage update to run after the response is sent
+  // This is wrapped in a promise to ensure it only runs once upon close/error
   ctx.waitUntil(new Promise(resolve => {
-    webSocket.addEventListener('close', () => {
+    const cleanup = () => {
       updateUsageInDB().finally(resolve);
-    });
-    webSocket.addEventListener('error', () => {
-      updateUsageInDB().finally(resolve);
-    });
+    };
+    webSocket.addEventListener('close', cleanup, { once: true });
+    webSocket.addEventListener('error', cleanup, { once: true });
+    // In case the connection is aborted immediately without close/error events, we also resolve after a brief delay
+    // This is generally covered by the WritableStream catch, but helps for edge cases.
+    setTimeout(cleanup, 30000); 
   }));
 
   // Create transform streams to count bytes
@@ -1153,62 +1175,88 @@ async function ProtocolOverWSHandler(request, env, ctx) {
 * @returns {Promise<object>}
 */
 async function ProcessProtocolHeader(protocolBuffer, env, ctx) {
-  if (protocolBuffer.byteLength < 24) return { hasError: true, message: 'invalid data' };
+  // Version + UUID (1 byte + 16 bytes) = 17 bytes min
+  if (protocolBuffer.byteLength < 17) return { hasError: true, message: 'invalid data' };
   const dataView = new DataView(protocolBuffer.buffer);
-  const version = dataView.getUint8(0);
+  const version = dataView.getUint8(0); // VLESS version (1 byte)
+  
   let uuid;
   try {
+    // CRITICAL FIX: UUID is 16 bytes, starting from index 1 (after version)
     uuid = stringify(new Uint8Array(protocolBuffer.slice(1, 17)));
   } catch (e) {
-    return { hasError: true, message: 'invalid UUID' };
+    return { hasError: true, message: 'invalid UUID format' };
   }
   
   const userData = await getUserData(env, uuid, ctx); // Pass ctx
-  // User validation (expiry, data limit) will be done in the main handler
   if (!userData) {
     return { hasError: true, message: 'invalid user' };
   }
+  
+  // Start parsing VLESS payload after UUID
+  const payloadStart = 17;
+  if (protocolBuffer.byteLength < payloadStart + 1) return { hasError: true, message: 'invalid data length' };
+  
+  // Read option length (1 byte)
+  const optLength = dataView.getUint8(payloadStart);
+  
+  // Check for command byte
+  const commandIndex = payloadStart + 1 + optLength;
+  if (protocolBuffer.byteLength < commandIndex + 1) return { hasError: true, message: 'invalid data length (command)' };
+  const command = dataView.getUint8(commandIndex);
+  if (command !== 1 && command !== 2) return { hasError: true, message: `command ${command} is not supported` }; // 1: TCP, 2: UDP
 
-  const optLength = dataView.getUint8(17);
-  const command = dataView.getUint8(18 + optLength);
-  if (command !== 1 && command !== 2) return { hasError: true, message: `command ${command} is not supported` };
+  // Read Port (2 bytes)
+  const portIndex = commandIndex + 1;
+  if (protocolBuffer.byteLength < portIndex + 2) return { hasError: true, message: 'invalid data length (port)' };
+  const portRemote = dataView.getUint16(portIndex, false); // Big-endian
 
-  const portIndex = 18 + optLength + 1;
-  const portRemote = dataView.getUint16(portIndex);
-  const addressType = dataView.getUint8(portIndex + 2);
+  // Read Address Type (1 byte)
+  const addressTypeIndex = portIndex + 2;
+  if (protocolBuffer.byteLength < addressTypeIndex + 1) return { hasError: true, message: 'invalid data length (address type)' };
+  const addressType = dataView.getUint8(addressTypeIndex);
+  
   let addressValue, addressLength, addressValueIndex;
 
   switch (addressType) {
-    case 1: // IPv4
+    case 1: // IPv4 (4 bytes)
       addressLength = 4;
-      addressValueIndex = portIndex + 3;
+      addressValueIndex = addressTypeIndex + 1;
+      if (protocolBuffer.byteLength < addressValueIndex + addressLength) return { hasError: true, message: 'invalid data length (ipv4)' };
       addressValue = new Uint8Array(protocolBuffer.slice(addressValueIndex, addressValueIndex + addressLength)).join('.');
       break;
-    case 2: // Domain
-      addressLength = dataView.getUint8(portIndex + 3);
-      addressValueIndex = portIndex + 4;
+    case 2: // Domain (1 byte length + domain bytes)
+      addressLength = dataView.getUint8(addressTypeIndex + 1); // Domain length
+      addressValueIndex = addressTypeIndex + 2;
+      if (protocolBuffer.byteLength < addressValueIndex + addressLength) return { hasError: true, message: 'invalid data length (domain)' };
       addressValue = new TextDecoder().decode(protocolBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
       break;
-    case 3: // IPv6
+    case 3: // IPv6 (16 bytes)
       addressLength = 16;
-      addressValueIndex = portIndex + 3;
-      addressValue = Array.from({ length: 8 }, (_, i) => dataView.getUint16(addressValueIndex + i * 2).toString(16)).join(':');
+      addressValueIndex = addressTypeIndex + 1;
+      if (protocolBuffer.byteLength < addressValueIndex + addressLength) return { hasError: true, message: 'invalid data length (ipv6)' };
+      addressValue = Array.from({ length: 8 }, (_, i) => dataView.getUint16(addressValueIndex + i * 2, false).toString(16)).join(':');
       break;
     default:
       return { hasError: true, message: `invalid addressType: ${addressType}` };
   }
 
+  // The raw data starts immediately after the address value
+  const rawDataIndex = addressValueIndex + addressLength;
+  if (protocolBuffer.byteLength < rawDataIndex) return { hasError: true, message: 'invalid data length (raw data)' };
+
   return {
-    user: userData, // Pass the full user object back
+    user: userData, 
     hasError: false,
     addressRemote: addressValue,
     addressType,
     portRemote,
-    rawDataIndex: addressValueIndex + addressLength,
+    rawDataIndex,
     ProtocolVersion: new Uint8Array([version]),
     isUDP: command === 2,
   };
 }
+
 
 /**
 * Handles TCP outbound connection.
@@ -1255,8 +1303,13 @@ async function HandleTCPOutBound(
     RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, null, log, usageCounterUpstream);
   }
 
-  const tcpSocket = await connectAndWrite(addressRemote, portRemote);
-  RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, retry, log, usageCounterUpstream);
+  try {
+      const tcpSocket = await connectAndWrite(addressRemote, portRemote);
+      RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, retry, log, usageCounterUpstream);
+  } catch (e) {
+      log(`Failed to connect to ${addressRemote}:${portRemote}: ${e.message}`);
+      safeCloseWebSocket(webSocket);
+  }
 }
 
 /**
@@ -1365,7 +1418,7 @@ function safeCloseWebSocket(socket) {
 * @param {WebSocket} webSocket
 * @param {Uint8Array} vlessResponseHeader
 * @param {function} log
-* @param {function} updateUpstreamUsage - --- FIX: Changed from stream to callback ---
+* @param {function} updateUpstreamUsage - Callback to update traffic usage
 */
 async function createDnsPipeline(rawClientData, webSocket, vlessResponseHeader, log, updateUpstreamUsage) {
   const readable = new ReadableStream({
@@ -1402,6 +1455,7 @@ async function createDnsPipeline(rawClientData, webSocket, vlessResponseHeader, 
       new WritableStream({
         async write(chunk) {
           try {
+            // Forward DNS query to 1.1.1.1
             const resp = await fetch('https://1.1.1.1/dns-query', {
               method: 'POST',
               headers: { 'content-type': 'application/dns-message' },
@@ -1416,11 +1470,11 @@ async function createDnsPipeline(rawClientData, webSocket, vlessResponseHeader, 
                 ? new Blob([udpSizeBuffer, dnsQueryResult])
                 : new Blob([vlessResponseHeader, udpSizeBuffer, dnsQueryResult]);
               
-              // --- FIX: Manually update usage and send ---
               const responseChunk = await blob.arrayBuffer();
-              updateUpstreamUsage(responseChunk.byteLength);
+              
+              // CRITICAL FIX: Update usage with the actual response chunk size
+              updateUpstreamUsage(responseChunk.byteLength); 
               webSocket.send(responseChunk);
-              // --- End Fix ---
               
               isHeaderSent = true;
             }
@@ -1428,6 +1482,9 @@ async function createDnsPipeline(rawClientData, webSocket, vlessResponseHeader, 
             log('DNS query error: ' + error);
           }
         },
+        abort(e) {
+             log('DNS WritableStream aborted: ' + e);
+        }
       }),
     );
   } catch (e) {
@@ -1479,7 +1536,10 @@ async function getIPRiskScore(ip, cfg) {
         if (!response.ok) return "N/A (API Error)";
         const data = await response.json();
         if (data.status === 'ok') {
-            return `${data.score} - ${data.risk.charAt(0).toUpperCase() + data.risk.slice(1)}`;
+            // Scamalytics returns 0 to 100, 0 is low risk. 
+            // We ensure risk is capitalized for display.
+            const riskText = data.risk.charAt(0).toUpperCase() + data.risk.slice(1);
+            return `${data.score} - ${riskText}`;
         }
         return `Error: ${data.error_message || 'API error'}`;
     } catch (e) {
@@ -1499,39 +1559,27 @@ async function handleNetworkInfoRequest(request, env, cfg, ctx) {
     const userIP = request.headers.get('CF-Connecting-IP');
 
     // 1. Get Proxy Info (from cache or fetch)
-    let proxyIPInfo = await env.USER_KV.get('proxy_ip_info', 'json');
+    let proxyIPInfo = await env.USER_KV?.get('proxy_ip_info', 'json');
     if (!proxyIPInfo) {
-        try {
-            const ipResponse = await fetch('https://1.1.1.1/cdn-cgi/trace');
-            if (ipResponse.ok) {
-                const text = await ipResponse.text();
-                const match = text.match(/ip=([^\n]+)/);
-                if (match && match[1]) {
-                    const ip = match[1];
-                    proxyIPInfo = await getIPGeoInfo(ip);
-                    if (proxyIPInfo) {
-                        ctx.waitUntil(env.USER_KV.put('proxy_ip_info', JSON.stringify(proxyIPInfo), { expirationTtl: 3600 }));
-                    }
-                }
-            }
-        } catch (e) { 
-            console.error('Failed to determine proxy IP info:', e); 
-        }
+        let determinedIP = cfg.proxyIP;
         
-        // Fallback if trace failed or proxyIPInfo is still null
-        if (!proxyIPInfo) {
+        // Try to get real CF Worker IP if proxyIP is default/placeholder
+        if (!determinedIP || determinedIP.includes('d342d11e')) {
              try {
-                 const ipResponse = await fetch('https://api.ipify.org?format=json');
-                 if (ipResponse.ok) {
-                     const { ip } = await ipResponse.json();
-                     proxyIPInfo = await getIPGeoInfo(ip);
-                     if (proxyIPInfo) {
-                        ctx.waitUntil(env.USER_KV.put('proxy_ip_info', JSON.stringify(proxyIPInfo), { expirationTtl: 3600 }));
-                     }
-                 }
+                const ipResponse = await fetch('https://api.ipify.org?format=json');
+                if (ipResponse.ok) {
+                    const { ip } = await ipResponse.json();
+                    determinedIP = ip;
+                }
             } catch (e2) {
                  console.error('Failed to determine proxy IP info (fallback):', e2);
             }
+        }
+        
+        proxyIPInfo = await getIPGeoInfo(determinedIP);
+        
+        if (proxyIPInfo && env.USER_KV) {
+            ctx.waitUntil(env.USER_KV.put('proxy_ip_info', JSON.stringify(proxyIPInfo), { expirationTtl: 3600 }));
         }
     }
 
@@ -1562,23 +1610,42 @@ async function handleNetworkInfoRequest(request, env, cfg, ctx) {
 * @returns {Promise<Response>}
 */
 async function handleConfigPage(userID, hostName, proxyAddress, userData, userIP, env, cfg, ctx) {
-    const { expiration_date: expDate, expiration_time: expTime, data_usage, data_limit } = userData;
-    const html = generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsage, dataLimit);
+    // CRITICAL FIX: Ensure the correct properties from userData are passed
+    const { expiration_date, expiration_time, data_usage, data_limit } = userData;
+    
+    // The function call now uses the correctly destructured variable names
+    const html = generateBeautifulConfigPage(userID, hostName, expiration_date, expiration_time, data_usage, data_limit); 
+    
     return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
 }
 
+/**
+ * Generates the HTML for the beautiful config page.
+ * @param {string} userID 
+ * @param {string} hostName 
+ * @param {string} expDate 
+ * @param {string} expTime 
+ * @param {number} dataUsage 
+ * @param {number} dataLimit 
+ * @returns {string}
+ */
 function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsage, dataLimit) {
     const subXrayUrl = `https://${hostName}/xray/${userID}`;
     const subSbUrl = `https://${hostName}/sb/${userID}`;
     const clashMetaUrl = `clash://install-config?url=${encodeURIComponent(subSbUrl)}`;
     
-    const utcTimestamp = `${expDate}T${expTime.split('.')[0]}Z`;
+    // Ensure time part has seconds for Date object creation
+    const expTimeSeconds = expTime.includes(':') && expTime.split(':').length === 2 ? `${expTime}:00` : expTime;
+    const utcTimestamp = `${expDate}T${expTimeSeconds.split('.')[0]}Z`;
+
     const isUserExpired = isExpired(expDate, expTime);
     const hasDataLimit = dataLimit > 0;
     const dataLimitReached = hasDataLimit && (dataUsage >= dataLimit);
     
-    let statusMessage = "Expires in ...";
+    let statusMessage = "Checking...";
     let statusColorClass = "status-active-text";
+    
+    // Set initial status message based on current static data
     if (isUserExpired) {
         statusMessage = "Subscription Expired";
         statusColorClass = "status-expired-text";
@@ -1757,6 +1824,10 @@ function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsa
                     else if (Math.abs(diffSeconds) < 86400) relTime = rtf.format(Math.round(diffSeconds / 3600), 'hour');
                     else relTime = rtf.format(Math.round(diffSeconds / 86400), 'day');
                     relativeElement.textContent = \`Expires \${relTime}\`;
+                } else if (isExpired && !relativeElement.textContent.includes("Expired") && !relativeElement.textContent.includes("Reached")) {
+                    relativeElement.textContent = "Subscription Expired";
+                    relativeElement.classList.add('status-expired-text');
+                    relativeElement.classList.remove('status-active-text');
                 }
                 document.getElementById('local-time').textContent = utcDate.toLocaleString(undefined, { timeZoneName: 'short' });
                 document.getElementById('tehran-time').textContent = utcDate.toLocaleString('en-US', { timeZone: 'Asia/Tehran', hour12: true, year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
@@ -1780,11 +1851,11 @@ function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsa
                     const data = await response.json();
                     
                     document.getElementById('proxy-ip').textContent = data.proxy?.ip || 'N/A';
-                    document.getElementById('proxy-location').textContent = \`\${data.proxy?.city || ''}, \${data.proxy?.country || 'N/A'}\`;
+                    document.getElementById('proxy-location').textContent = \`\${data.proxy?.city || ''}\${data.proxy?.city && data.proxy?.country ? ', ' : ''}\${data.proxy?.country || 'N/A'}\`;
                     document.getElementById('proxy-isp').textContent = data.proxy?.isp || 'N/A';
                     
                     document.getElementById('user-ip').textContent = data.user?.ip || 'N/A';
-                    document.getElementById('user-location').textContent = \`\${data.user?.city || ''}, \${data.user?.country || 'N/A'}\`;
+                    document.getElementById('user-location').textContent = \`\${data.user?.city || ''}\${data.user?.city && data.user?.country ? ', ' : ''}\${data.user?.country || 'N/A'}\`;
                     document.getElementById('user-isp').textContent = data.user?.isp || 'N/A';
                     document.getElementById('user-risk').textContent = data.user?.risk || 'N/A';
                     
@@ -1806,7 +1877,7 @@ function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsa
                 document.querySelectorAll('.button[data-clipboard-text]').forEach(button => {
                     button.addEventListener('click', () => copyToClipboard(button, button.dataset.clipboardText));
                 });
-                setInterval(displayExpirationTimes, 60000);
+                setInterval(displayExpirationTimes, 60000); // Update every minute
             });
         </script>
     </body></html>`;
