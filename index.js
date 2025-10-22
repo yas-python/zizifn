@@ -47,7 +47,7 @@ import { connect } from 'cloudflare:sockets';
 const Config = {
   // Default values. Will be overridden by environment variables.
   userID: 'd342d11e-d424-4583-b36e-524ab1f0afa4',
-  proxyIPs: [], // <<< FIX: Changed from [''] to [] for correctness
+  proxyIPs: [], // <<< Note: Set PROXYIP in your env variables
   
   fromEnv(env) {
     let selectedProxyIP = env.PROXYIP;
@@ -55,7 +55,7 @@ const Config = {
         selectedProxyIP = this.proxyIPs[Math.floor(Math.random() * this.proxyIPs.length)];
     }
     
-    // FIX: Ensure selectedProxyIP is a string to prevent split errors
+    // Ensure selectedProxyIP is a string to prevent split errors
     selectedProxyIP = selectedProxyIP || ''; 
     
     const [proxyHost, proxyPort = '443'] = selectedProxyIP.split(':');
@@ -316,7 +316,7 @@ const adminPanelHTML = `<!DOCTYPE html>
 
     <script>
         document.addEventListener('DOMContentLoaded', () => {
-            // FIX: This is a more robust way to determine the API path,
+            // This is a more robust way to determine the API path,
             // working correctly whether the path is /admin or /admin/
             const API_BASE = window.location.pathname + (window.location.pathname.endsWith('/') ? '' : '/') + 'api';
             const csrfToken = document.getElementById('csrf_token').value;
