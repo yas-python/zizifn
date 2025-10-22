@@ -1411,7 +1411,7 @@ async function createDnsPipeline(rawClientData, webSocket, vlessResponseHeader, 
       }),
     );
   } catch (e) {
-    log('DNS stream error: ' + e);
+    log('DNS stream error: 'T' + e);
   }
 }
 
@@ -1734,11 +1734,11 @@ function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsa
                     if (Math.abs(diffSeconds) < 3600) relTime = rtf.format(Math.round(diffSeconds / 60), 'minute');
                     else if (Math.abs(diffSeconds) < 86400) relTime = rtf.format(Math.round(diffSeconds / 3600), 'hour');
                     else relTime = rtf.format(Math.round(diffSeconds / 86400), 'day');
-                    relativeElement.textContent = `Expires ${relTime}`;
+                    relativeElement.textContent = \`Expires \${relTime}\`;
                 }
                 document.getElementById('local-time').textContent = utcDate.toLocaleString(undefined, { timeZoneName: 'short' });
                 document.getElementById('tehran-time').textContent = utcDate.toLocaleString('en-US', { timeZone: 'Asia/Tehran', hour12: true, year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-                document.getElementById('utc-time').textContent = `${utcDate.toISOString().substring(0, 19).replace('T', ' ')} UTC`;
+                document.getElementById('utc-time').textContent = \`\${utcDate.toISOString().substring(0, 19).replace('T', ' ')} UTC\`;
             }
             function displayDataUsage() {
                 const usageElement = document.getElementById('data-usage-display');
@@ -1747,10 +1747,10 @@ function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsa
                 const bytesToReadable = bytes => {
                     if (bytes <= 0) return '0 Bytes';
                     const i = Math.floor(Math.log(bytes) / Math.log(1024));
-                    return `${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} ${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}`;
+                    return \`\${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} \${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}\`;
                 };
                 const limitText = limit > 0 ? bytesToReadable(limit) : '&infin;';
-                usageElement.innerHTML = `${bytesToReadable(usage)} / ${limitText}`;
+                usageElement.innerHTML = \`\${bytesToReadable(usage)} / \${limitText}\`;
             }
             async function fetchNetworkInfo() {
                 try {
@@ -1758,11 +1758,11 @@ function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsa
                     const data = await response.json();
                     
                     document.getElementById('proxy-ip').textContent = data.proxy?.ip || 'N/A';
-                    document.getElementById('proxy-location').textContent = `${data.proxy?.city || ''}, ${data.proxy?.country || 'N/A'}`;
+                    document.getElementById('proxy-location').textContent = \`\${data.proxy?.city || ''}, \${data.proxy?.country || 'N/A'}\`;
                     document.getElementById('proxy-isp').textContent = data.proxy?.isp || 'N/A';
                     
                     document.getElementById('user-ip').textContent = data.user?.ip || 'N/A';
-                    document.getElementById('user-location').textContent = `${data.user?.city || ''}, ${data.user?.country || 'N/A'}`;
+                    document.getElementById('user-location').textContent = \`\${data.user?.city || ''}, \${data.user?.country || 'N/A'}\`;
                     document.getElementById('user-isp').textContent = data.user?.isp || 'N/A';
                     document.getElementById('user-risk').textContent = data.user?.risk || 'N/A';
                     
