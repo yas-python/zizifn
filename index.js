@@ -558,6 +558,41 @@ async function checkAdminAuth(request, env, cfg) {
 }
 
 /**
+* Handles a robust catch for API endpoints.
+* @param {any} e The caught error.
+* @param {string} [context] Optional context for logging.
+* @returns {Response} A JSON error response.
+*/
+function handleApiError(e, context = '') {
+  console.error(`API Error${context ? ` (${context})` : ''}:`, e);
+  let errorMsg = 'An unexpected error occurred.';
+
+  if (e instanceof Error) {
+    errorMsg = e.message;
+  } else if (typeof e === 'string') {
+    errorMsg = e;
+  } else {
+    // Log the unknown error structure
+    console.error("Unknown error type caught:", e);
+  }
+
+  // Check for specific, user-friendly messages
+  if (typeof errorMsg === 'string') {
+    if (errorMsg.includes('UNIQUE constraint failed')) {
+      errorMsg = 'UUID already exists.';
+    } else if (errorMsg.includes('not iterable')) {
+      // Provide a more helpful message for the known D1 bug
+      errorMsg = 'Database binding error. Check worker logs.';
+    }
+  }
+  
+  return new Response(JSON.stringify({ error: errorMsg }), {
+    status: 400, // Use 400 for client errors, 500 for true server errors
+    headers: { 'Content-Type': 'application/json' }
+  });
+}
+
+/**
 * Handles all incoming requests to /admin/* routes.
 * @param {Request} request
 * @param {object} env
@@ -606,31 +641,40 @@ async function handleAdminRequest(request, env, cfg, ctx) {
           totalTraffic: stats?.totalTraffic || 0
         }), { status: 200, headers: jsonHeader });
       } catch (e) {
-        console.error("Error fetching stats:", e); // Added error logging
-        return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: jsonHeader });
+        return handleApiError(e, 'GET /stats');
       }
     }
     
     // GET /admin/api/users
     if (apiPath === '/users' && request.method === 'GET') {
-      const { results } = await env.DB.prepare("SELECT * FROM users ORDER BY created_at DESC").all();
-      return new Response(JSON.stringify(results ?? []), { status: 200, headers: jsonHeader });
+      try {
+        const { results } = await env.DB.prepare("SELECT * FROM users ORDER BY created_at DESC").all();
+        return new Response(JSON.stringify(results ?? []), { status: 200, headers: jsonHeader });
+      } catch (e) {
+        return handleApiError(e, 'GET /users');
+      }
     }
 
     // POST /admin/api/users
     if (apiPath === '/users' && request.method === 'POST') {
       try {
-        const { uuid, exp_date, exp_time, notes, data_limit } = await request.json();
-        // Fixed validation bug from Script 2
+        const body = await request.json();
+        const { uuid, exp_date, exp_time } = body;
+        
+        // **FIX: Robustly get values to prevent binding 'undefined'**
+        const notes_to_bind = body.notes || null;
+        const data_limit_to_bind = (typeof body.data_limit === 'number' && body.data_limit >= 0) ? body.data_limit : 0;
+
         if (!uuid || !exp_date || !exp_time || !isValidUUID(uuid)) {
           throw new Error('Invalid or missing fields. (uuid, exp_date, exp_time are required).');
         }
+
         await env.DB.prepare("INSERT INTO users (uuid, expiration_date, expiration_time, notes, data_limit) VALUES (?, ?, ?, ?, ?)")
-          .bind(uuid, exp_date, exp_time, notes || null, data_limit >= 0 ? data_limit : 0).run();
+          .bind(uuid, exp_date, exp_time, notes_to_bind, data_limit_to_bind).run();
+          
         return new Response(JSON.stringify({ success: true, uuid }), { status: 201, headers: jsonHeader });
       } catch (e) {
-        const errorMsg = e.message.includes('UNIQUE constraint failed') ? 'UUID already exists.' : e.message;
-        return new Response(JSON.stringify({ error: errorMsg }), { status: 400, headers: jsonHeader });
+        return handleApiError(e, 'POST /users');
       }
     }
 
@@ -640,28 +684,39 @@ async function handleAdminRequest(request, env, cfg, ctx) {
       // PUT /admin/api/users/:uuid
       if (request.method === 'PUT') {
           try {
-            const { exp_date, exp_time, notes, data_limit, reset_traffic } = await request.json();
+            const body = await request.json();
+            const { exp_date, exp_time } = body;
+            
+            // **FIX: Robustly get values**
+            const notes_to_bind = body.notes || null;
+            const data_limit_to_bind = (typeof body.data_limit === 'number' && body.data_limit >= 0) ? body.data_limit : 0;
+            const reset_traffic = body.reset_traffic || false;
+
             if (!exp_date || !exp_time) throw new Error('Invalid date/time fields.');
 
             const sql = `UPDATE users SET expiration_date = ?, expiration_time = ?, notes = ?, data_limit = ? ${reset_traffic ? ', data_usage = 0' : ''} WHERE uuid = ?`;
-            await env.DB.prepare(sql).bind(exp_date, exp_time, notes || null, data_limit >= 0 ? data_limit : 0, uuid).run();
+            await env.DB.prepare(sql).bind(exp_date, exp_time, notes_to_bind, data_limit_to_bind, uuid).run();
             
             // Invalidate cache - NON-BLOCKING
             ctx.waitUntil(env.USER_KV.delete(`user:${uuid}`)); 
             
             return new Response(JSON.stringify({ success: true, uuid }), { status: 200, headers: jsonHeader });
         } catch (e) {
-            return new Response(JSON.stringify({ error: e.message }), { status: 400, headers: jsonHeader });
+            return handleApiError(e, `PUT /users/${uuid}`);
         }
       }
       // DELETE /admin/api/users/:uuid
       if (request.method === 'DELETE') {
-        await env.DB.prepare("DELETE FROM users WHERE uuid = ?").bind(uuid).run();
-        
-        // Invalidate cache - NON-BLOCKING
-        ctx.waitUntil(env.USER_KV.delete(`user:${uuid}`)); 
-        
-        return new Response(null, { status: 204 });
+        try {
+          await env.DB.prepare("DELETE FROM users WHERE uuid = ?").bind(uuid).run();
+          
+          // Invalidate cache - NON-BLOCKING
+          ctx.waitUntil(env.USER_KV.delete(`user:${uuid}`)); 
+          
+          return new Response(null, { status: 204 });
+        } catch (e) {
+          return handleApiError(e, `DELETE /users/${uuid}`);
+        }
       }
     }
     return new Response(JSON.stringify({ error: 'API route not found' }), { status: 404, headers: jsonHeader });
@@ -739,30 +794,40 @@ async function handleManagementAPI(request, env, cfg, ctx) {
 
   // GET /api/v1/users
   if (url.pathname === '/api/v1/users' && request.method === 'GET') {
-    const { results } = await env.DB.prepare("SELECT * FROM users").all();
-    return new Response(JSON.stringify(results ?? []), { status: 200, headers: jsonHeader });
+    try {
+      const { results } = await env.DB.prepare("SELECT * FROM users").all();
+      return new Response(JSON.stringify(results ?? []), { status: 200, headers: jsonHeader });
+    } catch (e) {
+      return handleApiError(e, 'GET /api/v1/users');
+    }
   }
 
   // POST /api/v1/users
   if (url.pathname === '/api/v1/users' && request.method === 'POST') {
     try {
-      const { uuid, exp_date, exp_time, notes, data_limit_gb, data_limit_mb } = await request.json();
+      const body = await request.json();
+      const { uuid, exp_date, exp_time } = body;
+
       if (!uuid || !exp_date || !exp_time || !isValidUUID(uuid)) {
         throw new Error('Invalid or missing fields. (uuid, exp_date, exp_time are required).');
       }
+
+      // **FIX: Robustly get values**
+      const notes_to_bind = body.notes || null;
       let data_limit = 0;
-      if (data_limit_gb > 0) {
-        data_limit = data_limit_gb * 1024 * 1024 * 1024;
-      } else if (data_limit_mb > 0) {
-        data_limit = data_limit_mb * 1024 * 1024;
+      if (typeof body.data_limit_gb === 'number' && body.data_limit_gb > 0) {
+        data_limit = body.data_limit_gb * 1024 * 1024 * 1024;
+      } else if (typeof body.data_limit_mb === 'number' && body.data_limit_mb > 0) {
+        data_limit = body.data_limit_mb * 1024 * 1024;
       }
       
       await env.DB.prepare("INSERT INTO users (uuid, expiration_date, expiration_time, notes, data_limit) VALUES (?, ?, ?, ?, ?)")
-        .bind(uuid, exp_date, exp_time, notes || null, data_limit).run();
+        .bind(uuid, exp_date, exp_time, notes_to_bind, data_limit).run();
+        
       const user = await getUserData(env, uuid, ctx); // Get the created user data
       return new Response(JSON.stringify(user), { status: 201, headers: jsonHeader });
     } catch (e) {
-      return new Response(JSON.stringify({ error: e.message }), { status: 400, headers: jsonHeader });
+      return handleApiError(e, 'POST /api/v1/users');
     }
   }
 
@@ -771,40 +836,56 @@ async function handleManagementAPI(request, env, cfg, ctx) {
     
     // GET /api/v1/users/:uuid
     if (request.method === 'GET') {
-      const user = await getUserData(env, uuid, ctx);
-      if (!user) return new Response(JSON.stringify({ error: 'User not found' }), { status: 404, headers: jsonHeader });
-      return new Response(JSON.stringify(user), { status: 200, headers: jsonHeader });
+      try {
+        const user = await getUserData(env, uuid, ctx);
+        if (!user) return new Response(JSON.stringify({ error: 'User not found' }), { status: 404, headers: jsonHeader });
+        return new Response(JSON.stringify(user), { status: 200, headers: jsonHeader });
+      } catch (e) {
+        return handleApiError(e, `GET /api/v1/users/${uuid}`);
+      }
     }
     
     // DELETE /api/v1/users/:uuid
     if (request.method === 'DELETE') {
-      await env.DB.prepare("DELETE FROM users WHERE uuid = ?").bind(uuid).run();
-      ctx.waitUntil(env.USER_KV.delete(`user:${uuid}`)); // NON-BLOCKING
-      return new Response(null, { status: 204 });
+      try {
+        await env.DB.prepare("DELETE FROM users WHERE uuid = ?").bind(uuid).run();
+        ctx.waitUntil(env.USER_KV.delete(`user:${uuid}`)); // NON-BLOCKING
+        return new Response(null, { status: 204 });
+      } catch (e) {
+        return handleApiError(e, `DELETE /api/v1/users/${uuid}`);
+      }
     }
     
     // PUT /api/v1/users/:uuid (e.g., reset traffic or change expiry)
     if (request.method === 'PUT') {
-      const user = await getUserData(env, uuid, ctx);
-      if (!user) return new Response(JSON.stringify({ error: 'User not found' }), { status: 404, headers: jsonHeader });
-      
-      const body = await request.json();
-      const exp_date = body.exp_date || user.expiration_date;
-      const exp_time = body.exp_time || user.expiration_time;
-      const notes = body.notes !== undefined ? body.notes : user.notes;
-      let data_limit = user.data_limit;
-      if (body.data_limit_gb !== undefined) {
-        data_limit = body.data_limit_gb * 1024 * 1024 * 1024;
-      } else if (body.data_limit_mb !== undefined) {
-        data_limit = body.data_limit_mb * 1024 * 1024;
+      try {
+        const user = await getUserData(env, uuid, ctx);
+        if (!user) return new Response(JSON.stringify({ error: 'User not found' }), { status: 404, headers: jsonHeader });
+        
+        const body = await request.json();
+        
+        const exp_date = body.exp_date || user.expiration_date;
+        const exp_time = body.exp_time || user.expiration_time;
+        // **FIX: Use hasOwnProperty to allow setting notes to "" or null**
+        const notes_to_bind = body.hasOwnProperty('notes') ? (body.notes || null) : user.notes;
+        
+        let data_limit = user.data_limit;
+        // **FIX: Check type explicitly**
+        if (typeof body.data_limit_gb === 'number') {
+          data_limit = body.data_limit_gb * 1024 * 1024 * 1024;
+        } else if (typeof body.data_limit_mb === 'number') {
+          data_limit = body.data_limit_mb * 1024 * 1024;
+        }
+        
+        const sql = `UPDATE users SET expiration_date = ?, expiration_time = ?, notes = ?, data_limit = ? ${body.reset_traffic ? ', data_usage = 0' : ''} WHERE uuid = ?`;
+        await env.DB.prepare(sql).bind(exp_date, exp_time, notes_to_bind, data_limit, uuid).run();
+        ctx.waitUntil(env.USER_KV.delete(`user:${uuid}`)); // NON-BLOCKING
+        
+        const updatedUser = await getUserData(env, uuid, ctx);
+        return new Response(JSON.stringify(updatedUser), { status: 200, headers: jsonHeader });
+      } catch (e) {
+        return handleApiError(e, `PUT /api/v1/users/${uuid}`);
       }
-      
-      const sql = `UPDATE users SET expiration_date = ?, expiration_time = ?, notes = ?, data_limit = ? ${body.reset_traffic ? ', data_usage = 0' : ''} WHERE uuid = ?`;
-      await env.DB.prepare(sql).bind(exp_date, exp_time, notes, data_limit, uuid).run();
-      ctx.waitUntil(env.USER_KV.delete(`user:${uuid}`)); // NON-BLOCKING
-      
-      const updatedUser = await getUserData(env, uuid, ctx);
-      return new Response(JSON.stringify(updatedUser), { status: 200, headers: jsonHeader });
     }
   }
 
