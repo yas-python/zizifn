@@ -1,5 +1,5 @@
 /**
-* Cloudflare Worker VLESS Proxy - Ultimate Edition (v2 - Optimized)
+* Cloudflare Worker VLESS Proxy - Ultimate Edition (v2 - Optimized & Refined)
 *
 * This script merges the best features of two different versions:
 * 1.  Stable Connection Core (from Script 1) - Includes working VLESS over WS and UDP-over-TCP (DNS).
@@ -47,10 +47,17 @@ import { connect } from 'cloudflare:sockets';
 const Config = {
   // Default values. Will be overridden by environment variables.
   userID: 'd342d11e-d424-4583-b36e-524ab1f0afa4',
-  proxyIPs: [''], // <<< Note: Set PROXYIP in your env variables
+  proxyIPs: [], // <<< FIX: Changed from [''] to [] for correctness
   
   fromEnv(env) {
-    const selectedProxyIP = env.PROXYIP || this.proxyIPs[Math.floor(Math.random() * this.proxyIPs.length)];
+    let selectedProxyIP = env.PROXYIP;
+    if (!selectedProxyIP && this.proxyIPs.length > 0) {
+        selectedProxyIP = this.proxyIPs[Math.floor(Math.random() * this.proxyIPs.length)];
+    }
+    
+    // FIX: Ensure selectedProxyIP is a string to prevent split errors
+    selectedProxyIP = selectedProxyIP || ''; 
+    
     const [proxyHost, proxyPort = '443'] = selectedProxyIP.split(':');
     
     return {
@@ -309,7 +316,9 @@ const adminPanelHTML = `<!DOCTYPE html>
 
     <script>
         document.addEventListener('DOMContentLoaded', () => {
-            const API_BASE = window.location.pathname.replace(/[^/]*$/, '') + 'api'; 
+            // FIX: This is a more robust way to determine the API path,
+            // working correctly whether the path is /admin or /admin/
+            const API_BASE = window.location.pathname + (window.location.pathname.endsWith('/') ? '' : '/') + 'api';
             const csrfToken = document.getElementById('csrf_token').value;
             const apiHeaders = { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken };
             
@@ -680,6 +689,7 @@ async function handleAdminRequest(request, env, cfg, ctx) {
         const { uuid, exp_date, exp_time } = body;
         
         // **FIX: Robustly get values to prevent binding 'undefined'**
+        // (body.notes || null) is correct here, as an empty form field sends "" which becomes null.
         const notes_to_bind = body.notes || null;
         const data_limit_to_bind = (typeof body.data_limit === 'number' && body.data_limit >= 0) ? body.data_limit : 0;
 
@@ -706,6 +716,7 @@ async function handleAdminRequest(request, env, cfg, ctx) {
             const { exp_date, exp_time } = body;
             
             // **FIX: Robustly get values**
+            // (body.notes || null) is correct here for a full form update.
             const notes_to_bind = body.notes || null;
             const data_limit_to_bind = (typeof body.data_limit === 'number' && body.data_limit >= 0) ? body.data_limit : 0;
             const reset_traffic = body.reset_traffic || false;
@@ -752,7 +763,7 @@ async function handleAdminRequest(request, env, cfg, ctx) {
         ctx.waitUntil(env.USER_KV.put(`admin_session:${sessionToken}`, JSON.stringify({ csrfToken }), { expirationTtl: 86400 }));
         
         const headers = new Headers({
-          'Location': cfg.adminPath,
+          'Location': cfg.adminPath, // Redirect to /admin (JS fix handles trailing slash)
           'Set-Cookie': `auth_token=${sessionToken}; HttpOnly; Secure; Path=${cfg.adminPath}; Max-Age=86400; SameSite=Strict`
         });
         return new Response(null, { status: 302, headers });
@@ -768,8 +779,6 @@ async function handleAdminRequest(request, env, cfg, ctx) {
       
       if (isAdmin) {
         const panelWithCsrf = adminPanelHTML
-          // CRITICAL FIX: The regex was too greedy, replaced to use simple string replace
-          .replace(/__ADMIN_PATH__\/api/g, `${cfg.adminPath}/api`) 
           .replace(
             '<input type="hidden" id="csrf_token" name="csrf_token">',
             `<input type="hidden" id="csrf_token" name="csrf_token" value="${csrfToken}">`
@@ -831,7 +840,8 @@ async function handleManagementAPI(request, env, cfg, ctx) {
       }
 
       // **FIX: Robustly get values**
-      const notes_to_bind = body.notes || null;
+      // Use hasOwnProperty to correctly handle "" or null from an API
+      const notes_to_bind = body.hasOwnProperty('notes') ? (body.notes || null) : null;
       let data_limit = 0;
       if (typeof body.data_limit_gb === 'number' && body.data_limit_gb > 0) {
         data_limit = body.data_limit_gb * 1024 * 1024 * 1024;
