@@ -293,7 +293,8 @@ const adminPanelHTML = `<!DOCTYPE html>
 
     <script>
         document.addEventListener('DOMContentLoaded', () => {
-            const API_BASE = '${Config.fromEnv({}).adminPath}/api'; // Dynamically get admin path
+            // --- FIX: This placeholder will be replaced by the server ---
+            const API_BASE = '__ADMIN_PATH__/api'; 
             const csrfToken = document.getElementById('csrf_token').value;
             const apiHeaders = { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken };
             
@@ -662,10 +663,13 @@ async function handleAdminRequest(request, env, cfg) {
       if (errorResponse) return errorResponse; // Handles cookie clearing
       
       if (isAdmin) {
-        const panelWithCsrf = adminPanelHTML.replace(
-          '<input type="hidden" id="csrf_token" name="csrf_token">',
-          `<input type="hidden" id="csrf_token" name="csrf_token" value="${csrfToken}">`
-        );
+        // --- FIX: Inject both the admin path and CSRF token ---
+        const panelWithCsrf = adminPanelHTML
+          .replace('__ADMIN_PATH__', cfg.adminPath)
+          .replace(
+            '<input type="hidden" id="csrf_token" name="csrf_token">',
+            `<input type="hidden" id="csrf_token" name="csrf_token" value="${csrfToken}">`
+          );
         return new Response(panelWithCsrf, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
       } else {
         return new Response(adminLoginHTML, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
@@ -1080,7 +1084,9 @@ async function ProtocolOverWSHandler(request, env, ctx) {
           if (isUDP) {
             if (portRemote === 53) {
               isDns = true;
-              createDnsPipeline(rawClientData, webSocket, vlessResponseHeader, log, usageCounterUpstream);
+              // --- FIX: Pass a callback to update usage instead of the stream ---
+              const updateUpstreamUsage = (bytes) => { sessionUsage += bytes; };
+              createDnsPipeline(rawClientData, webSocket, vlessResponseHeader, log, updateUpstreamUsage);
             } else {
               controller.error(new Error('UDP proxy only for DNS (port 53)'));
             }
@@ -1096,7 +1102,7 @@ async function ProtocolOverWSHandler(request, env, ctx) {
             webSocket,
             vlessResponseHeader,
             log,
-            usageCounterUpstream // Pass upstream counter
+            usageCounterUpstream // Pass upstream counter stream for TCP
           );
         },
         close() {
@@ -1323,16 +1329,15 @@ function safeCloseWebSocket(socket) {
  * @param {WebSocket} webSocket
  * @param {Uint8Array} vlessResponseHeader
  * @param {function} log
- * @param {TransformStream} usageCounterUpstream
+ * @param {function} updateUpstreamUsage - --- FIX: Changed from stream to callback ---
  */
-async function createDnsPipeline(rawClientData, webSocket, vlessResponseHeader, log, usageCounterUpstream) {
+async function createDnsPipeline(rawClientData, webSocket, vlessResponseHeader, log, updateUpstreamUsage) {
   const readable = new ReadableStream({
     start(controller) {
       controller.enqueue(rawClientData);
       webSocket.addEventListener('message', (event) => {
         try {
-          // This should already be counted by the downstream counter
-          // sessionUsage += event.data.byteLength; 
+          // Downstream usage is already counted by the pipe in ProtocolOverWSHandler
           controller.enqueue(event.data);
         } catch (e) {
           controller.error(e);
@@ -1375,13 +1380,12 @@ async function createDnsPipeline(rawClientData, webSocket, vlessResponseHeader, 
                 ? new Blob([udpSizeBuffer, dnsQueryResult])
                 : new Blob([vlessResponseHeader, udpSizeBuffer, dnsQueryResult]);
               
-              // Manually pipe to upstream counter
+              // --- FIX: Manually update usage and send ---
               const responseChunk = await blob.arrayBuffer();
-              const counterWriter = usageCounterUpstream.writable.getWriter();
-              counterWriter.write(new Uint8Array(responseChunk));
-              counterWriter.releaseLock();
-              
+              updateUpstreamUsage(responseChunk.byteLength);
               webSocket.send(responseChunk);
+              // --- End Fix ---
+              
               isHeaderSent = true;
             }
           } catch (error) {
@@ -1459,13 +1463,29 @@ async function handleNetworkInfoRequest(request, env, cfg) {
     let proxyIPInfo = await env.USER_KV.get('proxy_ip_info', 'json');
     if (!proxyIPInfo) {
         try {
-            const ipResponse = await fetch('https://api.ipify.org?format=json');
-            const { ip } = await ipResponse.json();
+            // Use a Cloudflare endpoint to get our own IP, it's more reliable
+            const ipResponse = await fetch('https://1.1.1.1/cdn-cgi/trace');
+            const text = await ipResponse.text();
+            const ip = text.match(/ip=([^\n]+)/)[1];
+            
             proxyIPInfo = await getIPGeoInfo(ip);
             if (proxyIPInfo) {
                 await env.USER_KV.put('proxy_ip_info', JSON.stringify(proxyIPInfo), { expirationTtl: 3600 });
             }
-        } catch (e) { console.error('Failed to determine proxy IP info:', e); }
+        } catch (e) { 
+            console.error('Failed to determine proxy IP info:', e); 
+            // Fallback in case trace fails
+            try {
+                 const ipResponse = await fetch('https://api.ipify.org?format=json');
+                 const { ip } = await ipResponse.json();
+                 proxyIPInfo = await getIPGeoInfo(ip);
+                 if (proxyIPInfo) {
+                    await env.USER_KV.put('proxy_ip_info', JSON.stringify(proxyIPInfo), { expirationTtl: 3600 });
+                 }
+            } catch (e2) {
+                 console.error('Failed to determine proxy IP info (fallback):', e2);
+            }
+        }
     }
 
     // 2. Get User Info
@@ -1682,7 +1702,7 @@ function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsa
                 if (isNaN(utcDate.getTime())) return;
                 const diffSeconds = (utcDate.getTime() - new Date().getTime()) / 1000;
                 const isExpired = diffSeconds < 0;
-                if (!isExpired && !relativeElement.textContent.includes("Expired")) {
+                if (!isExpired && !relativeElement.textContent.includes("Expired") && !relativeElement.textContent.includes("Reached")) {
                     const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
                     let relTime = '';
                     if (Math.abs(diffSeconds) < 3600) relTime = rtf.format(Math.round(diffSeconds / 60), 'minute');
@@ -1722,6 +1742,8 @@ function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsa
                     
                 } catch (error) {
                     console.error('Network info refresh failed:', error);
+                    document.getElementById('proxy-ip').textContent = 'Error';
+                    document.getElementById('user-ip').textContent = 'Error';
                 }
             }
             document.addEventListener('DOMContentLoaded', () => {
