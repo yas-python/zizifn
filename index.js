@@ -1,42 +1,42 @@
 /**
- * Cloudflare Worker VLESS Proxy - Ultimate Edition
- *
- * This script merges the best features of two different versions:
- * 1.  Stable Connection Core (from Script 1) - Includes working VLESS over WS and UDP-over-TCP (DNS).
- * 2.  Advanced Admin Panel (from Script 2) - Includes D1 database, user management, expiration dates,
- * and DATA LIMITS (GB/MB/Unlimited) with traffic tracking.
- * 3.  Smart User Config Page (New Feature) - A professionally designed page showing:
- * - Network Information (Proxy IP/Location/ISP & User IP/Location/ISP/Risk Score).
- * - Expiration Date (Local, Tehran, UTC).
- * - Data Usage (with progress bar).
- * 4.  Enhanced Security & Flexibility:
- * - Configurable Admin Path (via ADMIN_PATH env variable).
- * - CSRF token protection for the admin panel.
- * - Management API (via API_TOKEN env variable) for external tools (e.g., Telegram bots).
- *
- * SETUP INSTRUCTIONS:
- * 1.  Create D1 Database, bind as DB.
- * 2.  Run this SQL command in your D1 DB:
- * CREATE TABLE IF NOT EXISTS users (
- * uuid TEXT PRIMARY KEY,
- * created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
- * expiration_date TEXT NOT NULL,
- * expiration_time TEXT NOT NULL,
- * notes TEXT,
- * data_limit INTEGER DEFAULT 0,
- * data_usage INTEGER DEFAULT 0
- * );
- * 3.  Create KV Namespace, bind as USER_KV.
- * 4.  Set Secrets:
- * - ADMIN_KEY: Your admin panel password.
- * - API_TOKEN: (Optional) A secret token for the management API.
- * 5.  Set Variables:
- * - ADMIN_PATH: (Optional) Custom path for admin panel (default: /admin).
- * - UUID: (Optional) A default fallback UUID.
- * - PROXYIP: (Optional) A default proxy IP.
- * - SCAMALYTICS_USERNAME: (Optional) Scamalytics username for risk scoring.
- * - SCAMALYTICS_API_KEY: (Optional) Scamalytics API key for risk scoring.
- */
+* Cloudflare Worker VLESS Proxy - Ultimate Edition
+*
+* This script merges the best features of two different versions:
+* 1.  Stable Connection Core (from Script 1) - Includes working VLESS over WS and UDP-over-TCP (DNS).
+* 2.  Advanced Admin Panel (from Script 2) - Includes D1 database, user management, expiration dates,
+* and DATA LIMITS (GB/MB/Unlimited) with traffic tracking.
+* 3.  Smart User Config Page (New Feature) - A professionally designed page showing:
+* - Network Information (Proxy IP/Location/ISP & User IP/Location/ISP/Risk Score).
+* - Expiration Date (Local, Tehran, UTC).
+* - Data Usage (with progress bar).
+* 4.  Enhanced Security & Flexibility:
+* - Configurable Admin Path (via ADMIN_PATH env variable).
+* - CSRF token protection for the admin panel.
+* - Management API (via API_TOKEN env variable) for external tools (e.g., Telegram bots).
+*
+* SETUP INSTRUCTIONS:
+* 1.  Create D1 Database, bind as DB.
+* 2.  Run this SQL command in your D1 DB:
+* CREATE TABLE IF NOT EXISTS users (
+* uuid TEXT PRIMARY KEY,
+* created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+* expiration_date TEXT NOT NULL,
+* expiration_time TEXT NOT NULL,
+* notes TEXT,
+* data_limit INTEGER DEFAULT 0,
+* data_usage INTEGER DEFAULT 0
+* );
+* 3.  Create KV Namespace, bind as USER_KV.
+* 4.  Set Secrets:
+* - ADMIN_KEY: Your admin panel password.
+* - API_TOKEN: (Optional) A secret token for the management API.
+* 5.  Set Variables:
+* - ADMIN_PATH: (Optional) Custom path for admin panel (default: /admin).
+* - UUID: (Optional) A default fallback UUID.
+* - PROXYIP: (Optional) A default proxy IP.
+* - SCAMALYTICS_USERNAME: (Optional) Scamalytics username for risk scoring.
+* - SCAMALYTICS_API_KEY: (Optional) Scamalytics API key for risk scoring.
+*/
 
 import { connect } from 'cloudflare:sockets';
 
@@ -76,10 +76,10 @@ const CONST = {
 // --- Helper & Utility Functions ---
 
 /**
- * Validates if a string is a standard RFC4122 UUID.
- * @param {string} uuid The string to validate.
- * @returns {boolean} True if the string is a valid UUID.
- */
+* Validates if a string is a standard RFC4122 UUID.
+* @param {string} uuid The string to validate.
+* @returns {boolean} True if the string is a valid UUID.
+*/
 function isValidUUID(uuid) {
   if (typeof uuid !== 'string') return false;
   const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -87,11 +87,11 @@ function isValidUUID(uuid) {
 }
 
 /**
- * Checks if a user's expiration date and time are in the future.
- * @param {string} expDate - The expiration date in 'YYYY-MM-DD' format (UTC).
- * @param {string} expTime - The expiration time in 'HH:MM:SS' format (UTC).
- * @returns {boolean} True if the expiration is in the past (expired).
- */
+* Checks if a user's expiration date and time are in the future.
+* @param {string} expDate - The expiration date in 'YYYY-MM-DD' format (UTC).
+* @param {string} expTime - The expiration time in 'HH:MM:SS' format (UTC).
+* @returns {boolean} True if the expiration is in the past (expired).
+*/
 function isExpired(expDate, expTime) {
   if (!expDate || !expTime) return true; // Default to expired if data is missing
   const expDatetimeUTC = new Date(`${expDate}T${expTime}Z`);
@@ -99,10 +99,10 @@ function isExpired(expDate, expTime) {
 }
 
 /**
- * Formats bytes into a human-readable string (KB, MB, GB).
- * @param {number} bytes - The number of bytes.
- * @returns {string} A human-readable string.
- */
+* Formats bytes into a human-readable string (KB, MB, GB).
+* @param {number} bytes - The number of bytes.
+* @returns {string} A human-readable string.
+*/
 function bytesToReadable(bytes) {
   if (bytes <= 0) return '0 Bytes';
   const i = Math.floor(Math.log(bytes) / Math.log(1024));
@@ -110,12 +110,12 @@ function bytesToReadable(bytes) {
 }
 
 /**
- * Retrieves user data, checking KV cache first, then falling back to D1.
- * This is the advanced version from Script 2, supporting all user fields.
- * @param {object} env - The worker environment object.
- * @param {string} uuid - The user's UUID.
- * @returns {Promise<object|null>} The user data or null if not found/invalid.
- */
+* Retrieves user data, checking KV cache first, then falling back to D1.
+* This is the advanced version from Script 2, supporting all user fields.
+* @param {object} env - The worker environment object.
+* @param {string} uuid - The user's UUID.
+* @returns {Promise<object|null>} The user data or null if not found/invalid.
+*/
 async function getUserData(env, uuid) {
   if (!isValidUUID(uuid)) {
     return null;
@@ -298,10 +298,10 @@ const adminPanelHTML = `<!DOCTYPE html>
             const apiHeaders = { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken };
             
             const api = {
-                get: (endpoint) => fetch(\`\${API_BASE}\${endpoint}\`).then(handleResponse),
-                post: (endpoint, body) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'POST', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
-                put: (endpoint, body) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'PUT', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
-                delete: (endpoint) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'DELETE', headers: apiHeaders }).then(handleResponse),
+                get: (endpoint) => fetch(`${API_BASE}${endpoint}`).then(handleResponse),
+                post: (endpoint, body) => fetch(`${API_BASE}${endpoint}`, { method: 'POST', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
+                put: (endpoint, body) => fetch(`${API_BASE}${endpoint}`, { method: 'PUT', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
+                delete: (endpoint) => fetch(`${API_BASE}${endpoint}`, { method: 'DELETE', headers: apiHeaders }).then(handleResponse),
             };
             
             async function handleResponse(response) {
@@ -311,7 +311,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                 }
                 if (!response.ok) {
                     const errorData = await response.json().catch(() => ({ error: 'An unknown error occurred.' }));
-                    throw new Error(errorData.error || \`Request failed with status \${response.status}\`);
+                    throw new Error(errorData.error || `Request failed with status ${response.status}`);
                 }
                 return response.status === 204 ? null : response.json();
             }
@@ -327,56 +327,56 @@ const adminPanelHTML = `<!DOCTYPE html>
             const pad = num => num.toString().padStart(2, '0');
             const localToUTC = (d, t) => {
                 if (!d || !t) return { utcDate: '', utcTime: '' };
-                const dt = new Date(\`\${d}T\${t}\`);
-                return { utcDate: \`\${dt.getUTCFullYear()}-\${pad(dt.getUTCMonth() + 1)}-\${pad(dt.getUTCDate())}\`, utcTime: \`\${pad(dt.getUTCHours())}:\${pad(dt.getUTCMinutes())}:\${pad(dt.getUTCSeconds())}\` };
+                const dt = new Date(`${d}T${t}`);
+                return { utcDate: `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`, utcTime: `${pad(dt.getUTCHours())}:${pad(dt.getUTCMinutes())}:${pad(dt.getUTCSeconds())}` };
             };
             const utcToLocal = (d, t) => {
                 if (!d || !t) return { localDate: '', localTime: '' };
-                const dt = new Date(\`\${d}T\${t}Z\`);
-                return { localDate: \`\${dt.getFullYear()}-\${pad(dt.getMonth() + 1)}-\${pad(dt.getDate())}\`, localTime: \`\${pad(dt.getHours())}:\${pad(dt.getMinutes())}:\${pad(dt.getSeconds())}\` };
+                const dt = new Date(`${d}T${t}Z`);
+                return { localDate: `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}`, localTime: `${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}` };
             };
             
             function bytesToReadable(bytes) {
                 if (bytes <= 0) return '0 Bytes';
                 const i = Math.floor(Math.log(bytes) / Math.log(1024));
-                return \`\${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} \${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}\`;
+                return `${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} ${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}`;
             }
 
             function renderStats(stats) {
                 const statsContainer = document.getElementById('stats');
-                statsContainer.innerHTML = \`
-                    <div class="stat-card"><h3 class="stat-title">Total Users</h3><p class="stat-value">\${stats.totalUsers}</p></div>
-                    <div class="stat-card"><h3 class="stat-title">Active Users</h3><p class="stat-value">\${stats.activeUsers}</p></div>
-                    <div class="stat-card"><h3 class="stat-title">Expired Users</h3><p class="stat-value">\${stats.expiredUsers}</p></div>
-                    <div class="stat-card"><h3 class="stat-title">Total Traffic Used</h3><p class="stat-value">\${bytesToReadable(stats.totalTraffic)}</p></div>
-                \`;
+                statsContainer.innerHTML = `
+                    <div class="stat-card"><h3 class="stat-title">Total Users</h3><p class="stat-value">${stats.totalUsers}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Active Users</h3><p class="stat-value">${stats.activeUsers}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Expired Users</h3><p class="stat-value">${stats.expiredUsers}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Total Traffic Used</h3><p class="stat-value">${bytesToReadable(stats.totalTraffic)}</p></div>
+                `;
             }
             
             function renderUsers(users) {
                 const userList = document.getElementById('userList');
                 userList.innerHTML = users.length === 0 ? '<tr><td colspan="7" style="text-align:center;">No users found.</td></tr>' : users.map(user => {
-                    const expiryUTC = new Date(\`\${user.expiration_date}T\${user.expiration_time}Z\`);
+                    const expiryUTC = new Date(`${user.expiration_date}T${user.expiration_time}Z`);
                     const isExpired = expiryUTC < new Date();
-                    const trafficUsage = user.data_limit > 0 ? \`\${bytesToReadable(user.data_usage)} / \${bytesToReadable(user.data_limit)}\` : \`\${bytesToReadable(user.data_usage)} / &infin;\`;
+                    const trafficUsage = user.data_limit > 0 ? `${bytesToReadable(user.data_usage)} / ${bytesToReadable(user.data_limit)}` : `${bytesToReadable(user.data_usage)} / &infin;`;
                     const trafficPercent = user.data_limit > 0 ? Math.min(100, (user.data_usage / user.data_limit * 100)) : 0;
                     
-                    return \`
-                        <tr data-uuid="\${user.uuid}">
-                            <td title="\${user.uuid}">\${user.uuid.substring(0, 8)}...<button class="btn-copy-uuid" title="Copy UUID">📋</button></td>
-                            <td>\${new Date(user.created_at).toLocaleString()}</td>
-                            <td>\${expiryUTC.toLocaleString()}</td>
-                            <td><span class="status-badge \${isExpired ? 'status-expired' : 'status-active'}">\${isExpired ? 'Expired' : 'Active'}</span></td>
+                    return `
+                        <tr data-uuid="${user.uuid}">
+                            <td title="${user.uuid}">${user.uuid.substring(0, 8)}...<button class="btn-copy-uuid" title="Copy UUID">📋</button></td>
+                            <td>${new Date(user.created_at).toLocaleString()}</td>
+                            <td>${expiryUTC.toLocaleString()}</td>
+                            <td><span class="status-badge ${isExpired ? 'status-expired' : 'status-active'}">${isExpired ? 'Expired' : 'Active'}</span></td>
                             <td>
-                                \${trafficUsage}
-                                <div class="traffic-bar"><div class="traffic-bar-inner" style="width: \${trafficPercent}%;"></div></div>
+                                ${trafficUsage}
+                                <div class="traffic-bar"><div class="traffic-bar-inner" style="width: ${trafficPercent}%;"></div></div>
                             </td>
-                            <td>\${user.notes || '-'}</td>
+                            <td>${user.notes || '-'}</td>
                             <td class="actions-cell">
                                 <button class="btn btn-secondary btn-edit">Edit</button>
                                 <button class="btn btn-danger btn-delete">Delete</button>
                             </td>
                         </tr>
-                    \`;
+                    `;
                 }).join('');
             }
 
@@ -452,8 +452,8 @@ const adminPanelHTML = `<!DOCTYPE html>
                     document.getElementById('resetTraffic').checked = false;
                     editModal.classList.add('show');
                 } else if (button.classList.contains('btn-delete')) {
-                    if (confirm(\`Are you sure you want to delete user \${uuid.substring(0,8)}...?\`)) {
-                        api.delete(\`/users/\${uuid}\`).then(() => {
+                    if (confirm(`Are you sure you want to delete user ${uuid.substring(0,8)}...?`)) {
+                        api.delete(`/users/${uuid}`).then(() => {
                             showToast('User deleted successfully!');
                             refreshData();
                         }).catch(err => showToast(err.message, true));
@@ -473,7 +473,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                     reset_traffic: document.getElementById('resetTraffic').checked,
                 };
                 try {
-                    await api.put(\`/users/\${uuid}\`, updatedData);
+                    await api.put(`/users/${uuid}`, updatedData);
                     showToast('User updated successfully!');
                     editModal.classList.remove('show');
                     refreshData();
@@ -493,8 +493,8 @@ const adminPanelHTML = `<!DOCTYPE html>
             const setDefaultExpiry = () => {
                 const now = new Date();
                 now.setMonth(now.getMonth() + 1);
-                document.getElementById('expiryDate').value = \`\${now.getFullYear()}-\${pad(now.getMonth() + 1)}-\${pad(now.getDate())}\`;
-                document.getElementById('expiryTime').value = \`\${pad(now.getHours())}:\${pad(now.getMinutes())}:\${pad(now.getSeconds())}\`;
+                document.getElementById('expiryDate').value = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+                document.getElementById('expiryTime').value = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
             };
             
             document.getElementById('uuid').value = crypto.randomUUID();
@@ -507,11 +507,11 @@ const adminPanelHTML = `<!DOCTYPE html>
 
 
 /**
- * Middleware to check admin authentication and CSRF token.
- * @param {Request} request The incoming request.
- * @param {object} env The worker environment.
- * @returns {Promise<{isAdmin: boolean, errorResponse: Response|null, csrfToken: string|null}>}
- */
+* Middleware to check admin authentication and CSRF token.
+* @param {Request} request The incoming request.
+* @param {object} env The worker environment.
+* @returns {Promise<{isAdmin: boolean, errorResponse: Response|null, csrfToken: string|null}>}
+*/
 async function checkAdminAuth(request, env, cfg) {
   const cookieHeader = request.headers.get('Cookie');
   const sessionToken = cookieHeader?.match(/auth_token=([^;]+)/)?.[1];
@@ -541,12 +541,12 @@ async function checkAdminAuth(request, env, cfg) {
 }
 
 /**
- * Handles all incoming requests to /admin/* routes.
- * @param {Request} request
- * @param {object} env
- * @param {object} cfg
- * @returns {Promise<Response>}
- */
+* Handles all incoming requests to /admin/* routes.
+* @param {Request} request
+* @param {object} env
+* @param {object} cfg
+* @returns {Promise<Response>}
+*/
 async function handleAdminRequest(request, env, cfg) {
   const url = new URL(request.url);
   const { pathname } = url;
@@ -569,7 +569,6 @@ async function handleAdminRequest(request, env, cfg) {
     // GET /admin/api/stats
     if (apiPath === '/stats' && request.method === 'GET') {
       try {
-        // <<< FIX 2: Changed .all() to .first() to fix "not iterable" error
         const stats = await env.DB.prepare(
           "SELECT COUNT(*) as totalUsers, " +
           "SUM(CASE WHEN DATETIME(expiration_date || 'T' || expiration_time || 'Z') > CURRENT_TIMESTAMP THEN 1 ELSE 0 END) as activeUsers, " +
@@ -578,7 +577,6 @@ async function handleAdminRequest(request, env, cfg) {
           "FROM users"
         ).first();
         
-        // <<< FIX 2: Added optional chaining (?. ) because 'stats' could be null if DB is empty
         return new Response(JSON.stringify({
           totalUsers: stats?.totalUsers || 0,
           activeUsers: stats?.activeUsers || 0,
@@ -667,7 +665,6 @@ async function handleAdminRequest(request, env, cfg) {
       if (errorResponse) return errorResponse; // Handles cookie clearing
       
       if (isAdmin) {
-        // <<< FIX 1: Corrected the typo .replaADMIN_PATHTH__ to .replace('__ADMIN_PATH__'
         const panelWithCsrf = adminPanelHTML
           .replace('__ADMIN_PATH__', cfg.adminPath)
           .replace(
@@ -688,12 +685,12 @@ async function handleAdminRequest(request, env, cfg) {
 // --- NEW: Management API (for bots, etc.) ---
 
 /**
- * Handles requests to the external management API.
- * @param {Request} request
- * @param {object} env
- * @param {object} cfg
- * @returns {Promise<Response>}
- */
+* Handles requests to the external management API.
+* @param {Request} request
+* @param {object} env
+* @param {object} cfg
+* @returns {Promise<Response>}
+*/
 async function handleManagementAPI(request, env, cfg) {
   const jsonHeader = { 'Content-Type': 'application/json' };
   
@@ -855,9 +852,13 @@ async function handleIpSubscription(core, userID, hostName) {
   const isPagesDeployment = hostName.endsWith('.pages.dev');
 
   mainDomains.forEach((domain, i) => {
-    links.push( buildLink({ core, proto: 'tls', userID, hostName, address: domain, port: pick(httpsPorts), tag: `D${i+1}` }) );
+    links.push(
+      buildLink({ core, proto: 'tls', userID, hostName, address: domain, port: pick(httpsPorts), tag: `D${i+1}` })
+    );
     if (!isPagesDeployment) {
-      links.push( buildLink({ core, proto: 'tcp', userID, hostName, address: domain, port: pick(httpPorts), tag: `D${i+1}` }) );
+      links.push(
+        buildLink({ core, proto: 'tcp', userID, hostName, address: domain, port: pick(httpPorts), tag: `D${i+1}` })
+      );
     }
   });
 
@@ -970,12 +971,12 @@ export default {
 // --- Merged Protocol Handler (Script 1 Core + Script 2 Traffic Counting) ---
 
 /**
- * Handles the VLESS WebSocket connection, validates the user, and counts traffic.
- * @param {Request} request
- * @param {object} env
- * @param {object} ctx
- * @returns {Promise<Response>}
- */
+* Handles the VLESS WebSocket connection, validates the user, and counts traffic.
+* @param {Request} request
+* @param {object} env
+* @param {object} ctx
+* @returns {Promise<Response>}
+*/
 async function ProtocolOverWSHandler(request, env, ctx) {
   const webSocketPair = new WebSocketPair();
   const [client, webSocket] = Object.values(webSocketPair);
@@ -1017,7 +1018,7 @@ async function ProtocolOverWSHandler(request, env, ctx) {
   }));
 
   // Create transform streams to count bytes
-  const createUsageCountingStream = () => {
+  const createUsageCountingTransform = () => {
     return new TransformStream({
       transform(chunk, controller) {
         sessionUsage += chunk.byteLength;
@@ -1025,8 +1026,8 @@ async function ProtocolOverWSHandler(request, env, ctx) {
       }
     });
   };
-  const usageCounterDownstream = createUsageCountingStream(); // client -> remote
-  const usageCounterUpstream = createUsageCountingStream();   // remote -> client
+  const usageCounterDownstream = createUsageCountingTransform(); // Count downstream traffic
+  const usageCounterUpstream = createUsageCountingTransform();   // Count upstream traffic
 
   const earlyDataHeader = request.headers.get('Sec-WebSocket-Protocol') || '';
   const readableWebSocketStream = MakeReadableWebSocketStream(webSocket, earlyDataHeader, log);
@@ -1090,7 +1091,7 @@ async function ProtocolOverWSHandler(request, env, ctx) {
               isDns = true;
               // --- FIX: Pass a callback to update usage instead of the stream ---
               const updateUpstreamUsage = (bytes) => { sessionUsage += bytes; };
-              createDnsPipeline(rawClientData, webSocket, vlessResponseHeader, log, updateUpstreamUsage);
+              await createDnsPipeline(rawClientData, webSocket, vlessResponseHeader, log, updateUpstreamUsage);
             } else {
               controller.error(new Error('UDP proxy only for DNS (port 53)'));
             }
@@ -1126,11 +1127,11 @@ async function ProtocolOverWSHandler(request, env, ctx) {
 }
 
 /**
- * Processes the VLESS header from the client.
- * @param {Uint8Array} protocolBuffer
- * @param {object} env
- * @returns {Promise<object>}
- */
+* Processes the VLESS header from the client.
+* @param {Uint8Array} protocolBuffer
+* @param {object} env
+* @returns {Promise<object>}
+*/
 async function ProcessProtocolHeader(protocolBuffer, env) {
   if (protocolBuffer.byteLength < 24) return { hasError: true, message: 'invalid data' };
   const dataView = new DataView(protocolBuffer.buffer);
@@ -1190,17 +1191,17 @@ async function ProcessProtocolHeader(protocolBuffer, env) {
 }
 
 /**
- * Handles TCP outbound connection.
- * @param {object} remoteSocket
- * @param {number} addressType
- * @param {string} addressRemote
- * @param {number} portRemote
- * @param {Uint8Array} rawClientData
- * @param {WebSocket} webSocket
- * @param {Uint8Array} protocolResponseHeader
- * @param {function} log
- * @param {TransformStream} usageCounterUpstream
- */
+* Handles TCP outbound connection.
+* @param {object} remoteSocket
+* @param {number} addressType
+* @param {string} addressRemote
+* @param {number} portRemote
+* @param {Uint8Array} rawClientData
+* @param {WebSocket} webSocket
+* @param {Uint8Array} protocolResponseHeader
+* @param {function} log
+* @param {TransformStream} usageCounterUpstream
+*/
 async function HandleTCPOutBound(
   remoteSocket,
   addressType,
@@ -1222,22 +1223,29 @@ async function HandleTCPOutBound(
     return tcpSocket;
   }
 
-  try {
+  async function retry() {
     const tcpSocket = await connectAndWrite(addressRemote, portRemote);
-    RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, log, usageCounterUpstream);
-  } catch (error) {
-    console.error(`Failed to connect to ${addressRemote}:${portRemote}:`, error);
-    safeCloseWebSocket(webSocket);
+    tcpSocket.closed
+      .catch(error => {
+        console.log('retry tcpSocket closed error', error);
+      })
+      .finally(() => {
+        safeCloseWebSocket(webSocket);
+      });
+    RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, null, log, usageCounterUpstream);
   }
+
+  const tcpSocket = await connectAndWrite(addressRemote, portRemote);
+  RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, retry, log, usageCounterUpstream);
 }
 
 /**
- * Creates a readable stream from a WebSocket.
- * @param {WebSocket} webSocketServer
- * @param {string} earlyDataHeader
- * @param {function} log
- * @returns {ReadableStream}
- */
+* Creates a readable stream from a WebSocket.
+* @param {WebSocket} webSocketServer
+* @param {string} earlyDataHeader
+* @param {function} log
+* @returns {ReadableStream}
+*/
 function MakeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
   return new ReadableStream({
     start(controller) {
@@ -1263,22 +1271,22 @@ function MakeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
 }
 
 /**
- * Pipes data from the remote socket to the WebSocket.
- * @param {Socket} remoteSocket
- * @param {WebSocket} webSocket
- * @param {Uint8Array} protocolResponseHeader
- * @param {function} log
- * @param {TransformStream} usageCounterUpstream
- */
-async function RemoteSocketToWS(remoteSocket, webSocket, protocolResponseHeader, log, usageCounterUpstream) {
+* Pipes data from the remote socket to the WebSocket.
+* @param {Socket} remoteSocket
+* @param {WebSocket} webSocket
+* @param {Uint8Array} protocolResponseHeader
+* @param {function} log
+* @param {TransformStream} usageCounterUpstream
+*/
+async function RemoteSocketToWS(remoteSocket, webSocket, protocolResponseHeader, retry, log, usageCounterUpstream) {
+  let hasIncomingData = false;
   try {
-    await remoteSocket.readable
-      .pipeThrough(usageCounterUpstream) // Count upstream traffic
-      .pipeTo(
+    await remoteSocket.readable.pipeThrough(usageCounterUpstream).pipeTo(
       new WritableStream({
         async write(chunk) {
           if (webSocket.readyState !== CONST.WS_READY_STATE_OPEN)
             throw new Error('WebSocket is not open');
+          hasIncomingData = true;
           const dataToSend = protocolResponseHeader
             ? await new Blob([protocolResponseHeader, chunk]).arrayBuffer()
             : chunk;
@@ -1286,7 +1294,7 @@ async function RemoteSocketToWS(remoteSocket, webSocket, protocolResponseHeader,
           protocolResponseHeader = null;
         },
         close() {
-          log('Remote connection readable closed.');
+          log(`Remote connection readable closed. Had incoming data: ${hasIncomingData}`);
         },
         abort(reason) {
           console.error('Remote connection readable aborted:', reason);
@@ -1296,6 +1304,10 @@ async function RemoteSocketToWS(remoteSocket, webSocket, protocolResponseHeader,
   } catch (error) {
     console.error('RemoteSocketToWS error:', error.stack || error);
     safeCloseWebSocket(webSocket);
+  }
+  if (!hasIncomingData && retry) {
+    log('No incoming data, retrying');
+    retry();
   }
 }
 
@@ -1328,13 +1340,13 @@ function safeCloseWebSocket(socket) {
 }
 
 /**
- * Handles DNS (UDP port 53) requests.
- * @param {Uint8Array} rawClientData
- * @param {WebSocket} webSocket
- * @param {Uint8Array} vlessResponseHeader
- * @param {function} log
- * @param {function} updateUpstreamUsage - --- FIX: Changed from stream to callback ---
- */
+* Handles DNS (UDP port 53) requests.
+* @param {Uint8Array} rawClientData
+* @param {WebSocket} webSocket
+* @param {Uint8Array} vlessResponseHeader
+* @param {function} log
+* @param {function} updateUpstreamUsage - --- FIX: Changed from stream to callback ---
+*/
 async function createDnsPipeline(rawClientData, webSocket, vlessResponseHeader, log, updateUpstreamUsage) {
   const readable = new ReadableStream({
     start(controller) {
@@ -1406,10 +1418,10 @@ async function createDnsPipeline(rawClientData, webSocket, vlessResponseHeader, 
 // --- Smart Config Page Generation (New) ---
 
 /**
- * Fetches IP geolocation data.
- * @param {string} ip
- * @returns {Promise<object|null>}
- */
+* Fetches IP geolocation data.
+* @param {string} ip
+* @returns {Promise<object|null>}
+*/
 async function getIPGeoInfo(ip) {
     if (!ip) return null;
     try {
@@ -1432,11 +1444,11 @@ async function getIPGeoInfo(ip) {
 }
 
 /**
- * Fetches Scamalytics risk score.
- * @param {string} ip
- * @param {object} cfg
- * @returns {Promise<string>}
- */
+* Fetches Scamalytics risk score.
+* @param {string} ip
+* @param {object} cfg
+* @returns {Promise<string>}
+*/
 async function getIPRiskScore(ip, cfg) {
     if (!ip || !cfg.scamalytics.username || !cfg.scamalytics.apiKey) {
         return "N/A (Not Configured)";
@@ -1456,12 +1468,12 @@ async function getIPRiskScore(ip, cfg) {
 }
 
 /**
- * API endpoint for the config page to fetch network info dynamically.
- * @param {Request} request
- * @param {object} env
- * @param {object} cfg
- * @returns {Promise<Response>}
- */
+* API endpoint for the config page to fetch network info dynamically.
+* @param {Request} request
+* @param {object} env
+* @param {object} cfg
+* @returns {Promise<Response>}
+*/
 async function handleNetworkInfoRequest(request, env, cfg) {
     const userIP = request.headers.get('CF-Connecting-IP');
 
@@ -1469,7 +1481,6 @@ async function handleNetworkInfoRequest(request, env, cfg) {
     let proxyIPInfo = await env.USER_KV.get('proxy_ip_info', 'json');
     if (!proxyIPInfo) {
         try {
-            // <<< FIX 3: Made this section more robust against fetch failures
             const ipResponse = await fetch('https://1.1.1.1/cdn-cgi/trace');
             if (ipResponse.ok) {
                 const text = await ipResponse.text();
@@ -1518,16 +1529,16 @@ async function handleNetworkInfoRequest(request, env, cfg) {
 }
 
 /**
- * Generates the main HTML for the smart config page.
- * @param {string} userID
- * @param {string} hostName
- * @param {string} proxyAddress
- * @param {object} userData
- * @param {string} userIP
- * @param {object} env
- * @param {object} cfg
- * @returns {Promise<Response>}
- */
+* Generates the main HTML for the smart config page.
+* @param {string} userID
+* @param {string} hostName
+* @param {string} proxyAddress
+* @param {object} userData
+* @param {string} userIP
+* @param {object} env
+* @param {object} cfg
+* @returns {Promise<Response>}
+*/
 async function handleConfigPage(userID, hostName, proxyAddress, userData, userIP, env, cfg) {
     const { expiration_date: expDate, expiration_time: expTime, data_usage, data_limit } = userData;
     const html = generateBeautifulConfigPage(userID, hostName, expDate, expTime, data_usage, data_limit);
@@ -1723,11 +1734,11 @@ function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsa
                     if (Math.abs(diffSeconds) < 3600) relTime = rtf.format(Math.round(diffSeconds / 60), 'minute');
                     else if (Math.abs(diffSeconds) < 86400) relTime = rtf.format(Math.round(diffSeconds / 3600), 'hour');
                     else relTime = rtf.format(Math.round(diffSeconds / 86400), 'day');
-                    relativeElement.textContent = \`Expires \${relTime}\`;
+                    relativeElement.textContent = `Expires ${relTime}`;
                 }
                 document.getElementById('local-time').textContent = utcDate.toLocaleString(undefined, { timeZoneName: 'short' });
                 document.getElementById('tehran-time').textContent = utcDate.toLocaleString('en-US', { timeZone: 'Asia/Tehran', hour12: true, year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-                document.getElementById('utc-time').textContent = \`\${utcDate.toISOString().substring(0, 19).replace('T', ' ')} UTC\`;
+                document.getElementById('utc-time').textContent = `${utcDate.toISOString().substring(0, 19).replace('T', ' ')} UTC`;
             }
             function displayDataUsage() {
                 const usageElement = document.getElementById('data-usage-display');
@@ -1736,10 +1747,10 @@ function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsa
                 const bytesToReadable = bytes => {
                     if (bytes <= 0) return '0 Bytes';
                     const i = Math.floor(Math.log(bytes) / Math.log(1024));
-                    return \`\${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} \${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}\`;
+                    return `${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} ${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}`;
                 };
                 const limitText = limit > 0 ? bytesToReadable(limit) : '&infin;';
-                usageElement.innerHTML = \`\${bytesToReadable(usage)} / \${limitText}\`;
+                usageElement.innerHTML = `${bytesToReadable(usage)} / ${limitText}`;
             }
             async function fetchNetworkInfo() {
                 try {
@@ -1747,11 +1758,11 @@ function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsa
                     const data = await response.json();
                     
                     document.getElementById('proxy-ip').textContent = data.proxy?.ip || 'N/A';
-                    document.getElementById('proxy-location').textContent = \`\${data.proxy?.city || ''}, \${data.proxy?.country || 'N/A'}\`;
+                    document.getElementById('proxy-location').textContent = `${data.proxy?.city || ''}, ${data.proxy?.country || 'N/A'}`;
                     document.getElementById('proxy-isp').textContent = data.proxy?.isp || 'N/A';
                     
                     document.getElementById('user-ip').textContent = data.user?.ip || 'N/A';
-                    document.getElementById('user-location').textContent = \`\${data.user?.city || ''}, \${data.user?.country || 'N/A'}\`;
+                    document.getElementById('user-location').textContent = `${data.user?.city || ''}, ${data.user?.country || 'N/A'}`;
                     document.getElementById('user-isp').textContent = data.user?.isp || 'N/A';
                     document.getElementById('user-risk').textContent = data.user?.risk || 'N/A';
                     
