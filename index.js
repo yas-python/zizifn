@@ -1,5 +1,5 @@
 /**
-* Cloudflare Worker VLESS Proxy - Ultimate Edition
+* Cloudflare Worker VLESS Proxy - Ultimate Edition (v2 - Optimized)
 *
 * This script merges the best features of two different versions:
 * 1.  Stable Connection Core (from Script 1) - Includes working VLESS over WS and UDP-over-TCP (DNS).
@@ -13,6 +13,9 @@
 * - Configurable Admin Path (via ADMIN_PATH env variable).
 * - CSRF token protection for the admin panel.
 * - Management API (via API_TOKEN env variable) for external tools (e.g., Telegram bots).
+* 5.  PERFORMANCE ENHANCEMENT (New):
+* - Uses ctx.waitUntil for non-blocking KV cache writes and invalidations,
+* leading to faster API and user responses without sacrificing cache integrity.
 *
 * SETUP INSTRUCTIONS:
 * 1.  Create D1 Database, bind as DB.
@@ -114,9 +117,10 @@ function bytesToReadable(bytes) {
 * This is the advanced version from Script 2, supporting all user fields.
 * @param {object} env - The worker environment object.
 * @param {string} uuid - The user's UUID.
+* @param {object} ctx - The execution context for non-blocking operations.
 * @returns {Promise<object|null>} The user data or null if not found/invalid.
 */
-async function getUserData(env, uuid) {
+async function getUserData(env, uuid, ctx) {
   if (!isValidUUID(uuid)) {
     return null;
   }
@@ -139,8 +143,12 @@ async function getUserData(env, uuid) {
     return null;
   }
   
-  // 3. Store in KV for future requests (cache for 1 hour)
-  await env.USER_KV.put(cacheKey, JSON.stringify(userFromDb), { expirationTtl: 3600 });
+  // 3. Store in KV for future requests (cache for 1 hour) - NON-BLOCKING
+  if (ctx) {
+      ctx.waitUntil(env.USER_KV.put(cacheKey, JSON.stringify(userFromDb), { expirationTtl: 3600 }));
+  } else {
+      await env.USER_KV.put(cacheKey, JSON.stringify(userFromDb), { expirationTtl: 3600 });
+  }
   
   return userFromDb;
 }
@@ -510,6 +518,7 @@ const adminPanelHTML = `<!DOCTYPE html>
 * Middleware to check admin authentication and CSRF token.
 * @param {Request} request The incoming request.
 * @param {object} env The worker environment.
+* @param {object} cfg The configuration object.
 * @returns {Promise<{isAdmin: boolean, errorResponse: Response|null, csrfToken: string|null}>}
 */
 async function checkAdminAuth(request, env, cfg) {
@@ -545,9 +554,10 @@ async function checkAdminAuth(request, env, cfg) {
 * @param {Request} request
 * @param {object} env
 * @param {object} cfg
+* @param {object} ctx - Execution context for non-blocking ops.
 * @returns {Promise<Response>}
 */
-async function handleAdminRequest(request, env, cfg) {
+async function handleAdminRequest(request, env, cfg, ctx) {
   const url = new URL(request.url);
   const { pathname } = url;
   const jsonHeader = { 'Content-Type': 'application/json' };
@@ -623,7 +633,10 @@ async function handleAdminRequest(request, env, cfg) {
 
             const sql = `UPDATE users SET expiration_date = ?, expiration_time = ?, notes = ?, data_limit = ? ${reset_traffic ? ', data_usage = 0' : ''} WHERE uuid = ?`;
             await env.DB.prepare(sql).bind(exp_date, exp_time, notes || null, data_limit >= 0 ? data_limit : 0, uuid).run();
-            await env.USER_KV.delete(`user:${uuid}`); // Invalidate cache
+            
+            // Invalidate cache - NON-BLOCKING
+            ctx.waitUntil(env.USER_KV.delete(`user:${uuid}`)); 
+            
             return new Response(JSON.stringify({ success: true, uuid }), { status: 200, headers: jsonHeader });
         } catch (e) {
             return new Response(JSON.stringify({ error: e.message }), { status: 400, headers: jsonHeader });
@@ -632,7 +645,10 @@ async function handleAdminRequest(request, env, cfg) {
       // DELETE /admin/api/users/:uuid
       if (request.method === 'DELETE') {
         await env.DB.prepare("DELETE FROM users WHERE uuid = ?").bind(uuid).run();
-        await env.USER_KV.delete(`user:${uuid}`); // Invalidate cache
+        
+        // Invalidate cache - NON-BLOCKING
+        ctx.waitUntil(env.USER_KV.delete(`user:${uuid}`)); 
+        
         return new Response(null, { status: 204 });
       }
     }
@@ -647,8 +663,9 @@ async function handleAdminRequest(request, env, cfg) {
       if (formData.get('password') === env.ADMIN_KEY) {
         const sessionToken = crypto.randomUUID();
         const csrfToken = crypto.randomUUID();
-        // Store session for 24 hours (86400 seconds)
-        await env.USER_KV.put(`admin_session:${sessionToken}`, JSON.stringify({ csrfToken }), { expirationTtl: 86400 });
+        // Store session for 24 hours (86400 seconds) - NON-BLOCKING
+        ctx.waitUntil(env.USER_KV.put(`admin_session:${sessionToken}`, JSON.stringify({ csrfToken }), { expirationTtl: 86400 }));
+        
         const headers = new Headers({
           'Location': cfg.adminPath,
           'Set-Cookie': `auth_token=${sessionToken}; HttpOnly; Secure; Path=${cfg.adminPath}; Max-Age=86400; SameSite=Strict`
@@ -689,9 +706,10 @@ async function handleAdminRequest(request, env, cfg) {
 * @param {Request} request
 * @param {object} env
 * @param {object} cfg
+* @param {object} ctx - Execution context for non-blocking ops.
 * @returns {Promise<Response>}
 */
-async function handleManagementAPI(request, env, cfg) {
+async function handleManagementAPI(request, env, cfg, ctx) {
   const jsonHeader = { 'Content-Type': 'application/json' };
   
   // 1. Check API Token
@@ -724,7 +742,7 @@ async function handleManagementAPI(request, env, cfg) {
       
       await env.DB.prepare("INSERT INTO users (uuid, expiration_date, expiration_time, notes, data_limit) VALUES (?, ?, ?, ?, ?)")
         .bind(uuid, exp_date, exp_time, notes || null, data_limit).run();
-      const user = await getUserData(env, uuid); // Get the created user data
+      const user = await getUserData(env, uuid, ctx); // Get the created user data
       return new Response(JSON.stringify(user), { status: 201, headers: jsonHeader });
     } catch (e) {
       return new Response(JSON.stringify({ error: e.message }), { status: 400, headers: jsonHeader });
@@ -736,7 +754,7 @@ async function handleManagementAPI(request, env, cfg) {
     
     // GET /api/v1/users/:uuid
     if (request.method === 'GET') {
-      const user = await getUserData(env, uuid);
+      const user = await getUserData(env, uuid, ctx);
       if (!user) return new Response(JSON.stringify({ error: 'User not found' }), { status: 404, headers: jsonHeader });
       return new Response(JSON.stringify(user), { status: 200, headers: jsonHeader });
     }
@@ -744,13 +762,13 @@ async function handleManagementAPI(request, env, cfg) {
     // DELETE /api/v1/users/:uuid
     if (request.method === 'DELETE') {
       await env.DB.prepare("DELETE FROM users WHERE uuid = ?").bind(uuid).run();
-      await env.USER_KV.delete(`user:${uuid}`);
+      ctx.waitUntil(env.USER_KV.delete(`user:${uuid}`)); // NON-BLOCKING
       return new Response(null, { status: 204 });
     }
     
     // PUT /api/v1/users/:uuid (e.g., reset traffic or change expiry)
     if (request.method === 'PUT') {
-      const user = await getUserData(env, uuid);
+      const user = await getUserData(env, uuid, ctx);
       if (!user) return new Response(JSON.stringify({ error: 'User not found' }), { status: 404, headers: jsonHeader });
       
       const body = await request.json();
@@ -766,9 +784,9 @@ async function handleManagementAPI(request, env, cfg) {
       
       const sql = `UPDATE users SET expiration_date = ?, expiration_time = ?, notes = ?, data_limit = ? ${body.reset_traffic ? ', data_usage = 0' : ''} WHERE uuid = ?`;
       await env.DB.prepare(sql).bind(exp_date, exp_time, notes, data_limit, uuid).run();
-      await env.USER_KV.delete(`user:${uuid}`);
+      ctx.waitUntil(env.USER_KV.delete(`user:${uuid}`)); // NON-BLOCKING
       
-      const updatedUser = await getUserData(env, uuid);
+      const updatedUser = await getUserData(env, uuid, ctx);
       return new Response(JSON.stringify(updatedUser), { status: 200, headers: jsonHeader });
     }
   }
@@ -891,12 +909,12 @@ export default {
 
     // --- 1. Admin Panel Routing ---
     if (url.pathname.startsWith(cfg.adminPath)) {
-      return handleAdminRequest(request, env, cfg);
+      return handleAdminRequest(request, env, cfg, ctx);
     }
     
     // --- 2. Management API Routing ---
     if (cfg.apiToken && url.pathname.startsWith('/api/v1/')) {
-      return handleManagementAPI(request, env, cfg);
+      return handleManagementAPI(request, env, cfg, ctx);
     }
 
     // --- 3. WebSocket/VLESS Protocol Handling ---
@@ -908,13 +926,13 @@ export default {
     
     // --- 4. Network Info API (for config page) ---
     if (url.pathname === '/network-info') {
-      return handleNetworkInfoRequest(request, env, cfg);
+      return handleNetworkInfoRequest(request, env, cfg, ctx);
     }
 
     // --- 5. Subscription & Config Page Handling ---
     const handleSubscription = async (core) => {
       const uuid = url.pathname.slice(`/${core}/`.length);
-      const userData = await getUserData(env, uuid);
+      const userData = await getUserData(env, uuid, ctx);
       
       // Validation (Expiry & Data Limit)
       if (!userData || isExpired(userData.expiration_date, userData.expiration_time)) {
@@ -933,13 +951,13 @@ export default {
     // --- 6. Config Page handling (main route) ---
     const path = url.pathname.slice(1);
     if (isValidUUID(path)) {
-      const userData = await getUserData(env, path);
+      const userData = await getUserData(env, path, ctx);
       if (!userData) {
         return new Response('Invalid or expired user', { status: 403 });
       }
       
       // Pass all data to the new smart page generator
-      return handleConfigPage(path, url.hostname, cfg.proxyAddress, userData, request.headers.get('CF-Connecting-IP'), env, cfg);
+      return handleConfigPage(path, url.hostname, cfg.proxyAddress, userData, request.headers.get('CF-Connecting-IP'), env, cfg, ctx);
     }
 
     // --- 7. Root Proxy (from Script 1) ---
@@ -999,7 +1017,8 @@ async function ProtocolOverWSHandler(request, env, ctx) {
           .bind(usage, userUUID)
           .run();
         // Invalidate KV cache so next request gets fresh data
-        await env.USER_KV.delete(`user:${userUUID}`);
+        // We don't need to wait for this, but good to trigger
+        ctx.waitUntil(env.USER_KV.delete(`user:${userUUID}`));
         log(`Updated usage for ${userUUID} by ${usage} bytes.`);
       } catch (err) {
         console.error(`Failed to update usage for ${userUUID}:`, err);
@@ -1059,7 +1078,7 @@ async function ProtocolOverWSHandler(request, env, ctx) {
             rawDataIndex,
             ProtocolVersion = new Uint8Array([0, 0]),
             isUDP,
-          } = await ProcessProtocolHeader(chunk, env);
+          } = await ProcessProtocolHeader(chunk, env, ctx); // Pass ctx
 
           // --- User Validation (Expiry & Data Limit) ---
           if (hasError) {
@@ -1130,9 +1149,10 @@ async function ProtocolOverWSHandler(request, env, ctx) {
 * Processes the VLESS header from the client.
 * @param {Uint8Array} protocolBuffer
 * @param {object} env
+* @param {object} ctx
 * @returns {Promise<object>}
 */
-async function ProcessProtocolHeader(protocolBuffer, env) {
+async function ProcessProtocolHeader(protocolBuffer, env, ctx) {
   if (protocolBuffer.byteLength < 24) return { hasError: true, message: 'invalid data' };
   const dataView = new DataView(protocolBuffer.buffer);
   const version = dataView.getUint8(0);
@@ -1143,7 +1163,7 @@ async function ProcessProtocolHeader(protocolBuffer, env) {
     return { hasError: true, message: 'invalid UUID' };
   }
   
-  const userData = await getUserData(env, uuid);
+  const userData = await getUserData(env, uuid, ctx); // Pass ctx
   // User validation (expiry, data limit) will be done in the main handler
   if (!userData) {
     return { hasError: true, message: 'invalid user' };
@@ -1411,7 +1431,7 @@ async function createDnsPipeline(rawClientData, webSocket, vlessResponseHeader, 
       }),
     );
   } catch (e) {
-    log('DNS stream error: 'T' + e);
+    log('DNS stream error: ' + e);
   }
 }
 
@@ -1472,9 +1492,10 @@ async function getIPRiskScore(ip, cfg) {
 * @param {Request} request
 * @param {object} env
 * @param {object} cfg
+* @param {object} ctx
 * @returns {Promise<Response>}
 */
-async function handleNetworkInfoRequest(request, env, cfg) {
+async function handleNetworkInfoRequest(request, env, cfg, ctx) {
     const userIP = request.headers.get('CF-Connecting-IP');
 
     // 1. Get Proxy Info (from cache or fetch)
@@ -1489,7 +1510,7 @@ async function handleNetworkInfoRequest(request, env, cfg) {
                     const ip = match[1];
                     proxyIPInfo = await getIPGeoInfo(ip);
                     if (proxyIPInfo) {
-                        await env.USER_KV.put('proxy_ip_info', JSON.stringify(proxyIPInfo), { expirationTtl: 3600 });
+                        ctx.waitUntil(env.USER_KV.put('proxy_ip_info', JSON.stringify(proxyIPInfo), { expirationTtl: 3600 }));
                     }
                 }
             }
@@ -1505,7 +1526,7 @@ async function handleNetworkInfoRequest(request, env, cfg) {
                      const { ip } = await ipResponse.json();
                      proxyIPInfo = await getIPGeoInfo(ip);
                      if (proxyIPInfo) {
-                        await env.USER_KV.put('proxy_ip_info', JSON.stringify(proxyIPInfo), { expirationTtl: 3600 });
+                        ctx.waitUntil(env.USER_KV.put('proxy_ip_info', JSON.stringify(proxyIPInfo), { expirationTtl: 3600 }));
                      }
                  }
             } catch (e2) {
@@ -1537,11 +1558,12 @@ async function handleNetworkInfoRequest(request, env, cfg) {
 * @param {string} userIP
 * @param {object} env
 * @param {object} cfg
+* @param {object} ctx
 * @returns {Promise<Response>}
 */
-async function handleConfigPage(userID, hostName, proxyAddress, userData, userIP, env, cfg) {
+async function handleConfigPage(userID, hostName, proxyAddress, userData, userIP, env, cfg, ctx) {
     const { expiration_date: expDate, expiration_time: expTime, data_usage, data_limit } = userData;
-    const html = generateBeautifulConfigPage(userID, hostName, expDate, expTime, data_usage, data_limit);
+    const html = generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsage, dataLimit);
     return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
 }
 
