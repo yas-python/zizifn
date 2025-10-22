@@ -15,7 +15,7 @@
  * - Management API (via API_TOKEN env variable) for external tools (e.g., Telegram bots).
  *
  * SETUP INSTRUCTIONS:
- * 1.  Create D1 Database, bind as `DB`.
+ * 1.  Create D1 Database, bind as DB.
  * 2.  Run this SQL command in your D1 DB:
  * CREATE TABLE IF NOT EXISTS users (
  * uuid TEXT PRIMARY KEY,
@@ -26,16 +26,16 @@
  * data_limit INTEGER DEFAULT 0,
  * data_usage INTEGER DEFAULT 0
  * );
- * 3.  Create KV Namespace, bind as `USER_KV`.
+ * 3.  Create KV Namespace, bind as USER_KV.
  * 4.  Set Secrets:
- * - `ADMIN_KEY`: Your admin panel password.
- * - `API_TOKEN`: (Optional) A secret token for the management API.
+ * - ADMIN_KEY: Your admin panel password.
+ * - API_TOKEN: (Optional) A secret token for the management API.
  * 5.  Set Variables:
- * - `ADMIN_PATH`: (Optional) Custom path for admin panel (default: /admin).
- * - `UUID`: (Optional) A default fallback UUID.
- * - `PROXYIP`: (Optional) A default proxy IP.
- * - `SCAMALYTICS_USERNAME`: (Optional) Scamalytics username for risk scoring.
- * - `SCAMALYTICS_API_KEY`: (Optional) Scamalytics API key for risk scoring.
+ * - ADMIN_PATH: (Optional) Custom path for admin panel (default: /admin).
+ * - UUID: (Optional) A default fallback UUID.
+ * - PROXYIP: (Optional) A default proxy IP.
+ * - SCAMALYTICS_USERNAME: (Optional) Scamalytics username for risk scoring.
+ * - SCAMALYTICS_API_KEY: (Optional) Scamalytics API key for risk scoring.
  */
 
 import { connect } from 'cloudflare:sockets';
@@ -44,7 +44,7 @@ import { connect } from 'cloudflare:sockets';
 const Config = {
   // Default values. Will be overridden by environment variables.
   userID: 'd342d11e-d424-4583-b36e-524ab1f0afa4',
-  proxyIPs: [''],
+  proxyIPs: [''], // <<< Note: Set PROXYIP in your env variables
   
   fromEnv(env) {
     const selectedProxyIP = env.PROXYIP || this.proxyIPs[Math.floor(Math.random() * this.proxyIPs.length)];
@@ -293,7 +293,6 @@ const adminPanelHTML = `<!DOCTYPE html>
 
     <script>
         document.addEventListener('DOMContentLoaded', () => {
-            // --- FIX: This placeholder will be replaced by the server ---
             const API_BASE = '__ADMIN_PATH__/api'; 
             const csrfToken = document.getElementById('csrf_token').value;
             const apiHeaders = { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken };
@@ -387,7 +386,10 @@ const adminPanelHTML = `<!DOCTYPE html>
                     window.allUsers = users; // Cache user data globally for the edit modal
                     renderStats(stats);
                     renderUsers(users);
-                } catch (error) { showToast(error.message, true); }
+                } catch (error) { 
+                    console.error('Failed to refresh data:', error);
+                    showToast(error.message, true); 
+                }
             }
 
             const getLimitInBytes = (valueId, unitId) => {
@@ -567,22 +569,24 @@ async function handleAdminRequest(request, env, cfg) {
     // GET /admin/api/stats
     if (apiPath === '/stats' && request.method === 'GET') {
       try {
-        // This is a more efficient query to get all stats at once
-        const [stats] = await env.DB.prepare(
+        // <<< FIX 2: Changed .all() to .first() to fix "not iterable" error
+        const stats = await env.DB.prepare(
           "SELECT COUNT(*) as totalUsers, " +
           "SUM(CASE WHEN DATETIME(expiration_date || 'T' || expiration_time || 'Z') > CURRENT_TIMESTAMP THEN 1 ELSE 0 END) as activeUsers, " +
           "SUM(CASE WHEN DATETIME(expiration_date || 'T' || expiration_time || 'Z') <= CURRENT_TIMESTAMP THEN 1 ELSE 0 END) as expiredUsers, " +
           "SUM(data_usage) as totalTraffic " +
           "FROM users"
-        ).all();
+        ).first();
         
+        // <<< FIX 2: Added optional chaining (?. ) because 'stats' could be null if DB is empty
         return new Response(JSON.stringify({
-          totalUsers: stats.totalUsers || 0,
-          activeUsers: stats.activeUsers || 0,
-          expiredUsers: stats.expiredUsers || 0,
-          totalTraffic: stats.totalTraffic || 0
+          totalUsers: stats?.totalUsers || 0,
+          activeUsers: stats?.activeUsers || 0,
+          expiredUsers: stats?.expiredUsers || 0,
+          totalTraffic: stats?.totalTraffic || 0
         }), { status: 200, headers: jsonHeader });
       } catch (e) {
+        console.error("Error fetching stats:", e); // Added error logging
         return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: jsonHeader });
       }
     }
@@ -663,7 +667,7 @@ async function handleAdminRequest(request, env, cfg) {
       if (errorResponse) return errorResponse; // Handles cookie clearing
       
       if (isAdmin) {
-        // --- FIX: Inject both the admin path and CSRF token ---
+        // <<< FIX 1: Corrected the typo .replaADMIN_PATHTH__ to .replace('__ADMIN_PATH__'
         const panelWithCsrf = adminPanelHTML
           .replace('__ADMIN_PATH__', cfg.adminPath)
           .replace(
@@ -1410,6 +1414,7 @@ async function getIPGeoInfo(ip) {
     if (!ip) return null;
     try {
         const response = await fetch(`http://ip-api.com/json/${ip}?fields=status,message,country,city,isp,query,as`);
+        if (!response.ok) return null;
         const data = await response.json();
         if (data.status === 'success') {
             return {
@@ -1439,6 +1444,7 @@ async function getIPRiskScore(ip, cfg) {
     try {
         const url = `${cfg.scamalytics.baseUrl}${cfg.scamalytics.username}/?key=${cfg.scamalytics.apiKey}&ip=${ip}`;
         const response = await fetch(url);
+        if (!response.ok) return "N/A (API Error)";
         const data = await response.json();
         if (data.status === 'ok') {
             return `${data.score} - ${data.risk.charAt(0).toUpperCase() + data.risk.slice(1)}`;
@@ -1463,24 +1469,33 @@ async function handleNetworkInfoRequest(request, env, cfg) {
     let proxyIPInfo = await env.USER_KV.get('proxy_ip_info', 'json');
     if (!proxyIPInfo) {
         try {
-            // Use a Cloudflare endpoint to get our own IP, it's more reliable
+            // <<< FIX 3: Made this section more robust against fetch failures
             const ipResponse = await fetch('https://1.1.1.1/cdn-cgi/trace');
-            const text = await ipResponse.text();
-            const ip = text.match(/ip=([^\n]+)/)[1];
-            
-            proxyIPInfo = await getIPGeoInfo(ip);
-            if (proxyIPInfo) {
-                await env.USER_KV.put('proxy_ip_info', JSON.stringify(proxyIPInfo), { expirationTtl: 3600 });
+            if (ipResponse.ok) {
+                const text = await ipResponse.text();
+                const match = text.match(/ip=([^\n]+)/);
+                if (match && match[1]) {
+                    const ip = match[1];
+                    proxyIPInfo = await getIPGeoInfo(ip);
+                    if (proxyIPInfo) {
+                        await env.USER_KV.put('proxy_ip_info', JSON.stringify(proxyIPInfo), { expirationTtl: 3600 });
+                    }
+                }
             }
         } catch (e) { 
             console.error('Failed to determine proxy IP info:', e); 
-            // Fallback in case trace fails
-            try {
+        }
+        
+        // Fallback if trace failed or proxyIPInfo is still null
+        if (!proxyIPInfo) {
+             try {
                  const ipResponse = await fetch('https://api.ipify.org?format=json');
-                 const { ip } = await ipResponse.json();
-                 proxyIPInfo = await getIPGeoInfo(ip);
-                 if (proxyIPInfo) {
-                    await env.USER_KV.put('proxy_ip_info', JSON.stringify(proxyIPInfo), { expirationTtl: 3600 });
+                 if (ipResponse.ok) {
+                     const { ip } = await ipResponse.json();
+                     proxyIPInfo = await getIPGeoInfo(ip);
+                     if (proxyIPInfo) {
+                        await env.USER_KV.put('proxy_ip_info', JSON.stringify(proxyIPInfo), { expirationTtl: 3600 });
+                     }
                  }
             } catch (e2) {
                  console.error('Failed to determine proxy IP info (fallback):', e2);
