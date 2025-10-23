@@ -39,6 +39,10 @@
 * - PROXYIP: (Optional) A default proxy IP.
 * - SCAMALYTICS_USERNAME: (Optional) Scamalytics username for risk scoring.
 * - SCAMALYTICS_API_KEY: (Optional) Scamalytics API key for risk scoring.
+* 6. [!!! CRITICAL FOR CONNECTION !!!] Add to your wrangler.toml file:
+* [compatibility_flags]
+* sockets = true
+*
 */
 
 import { connect } from 'cloudflare:sockets';
@@ -329,10 +333,10 @@ const adminPanelHTML = `<!DOCTYPE html>
             const apiHeaders = { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken };
             
             const api = {
-                get: (endpoint) => fetch(\`\${API_BASE}\${endpoint}\`).then(handleResponse),
-                post: (endpoint, body) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'POST', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
-                put: (endpoint, body) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'PUT', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
-                delete: (endpoint) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'DELETE', headers: apiHeaders }).then(handleResponse),
+                get: (endpoint) => fetch(`${API_BASE}${endpoint}`).then(handleResponse),
+                post: (endpoint, body) => fetch(`${API_BASE}${endpoint}`, { method: 'POST', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
+                put: (endpoint, body) => fetch(`${API_BASE}${endpoint}`, { method: 'PUT', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
+                delete: (endpoint) => fetch(`${API_BASE}${endpoint}`, { method: 'DELETE', headers: apiHeaders }).then(handleResponse),
             };
             
             async function handleResponse(response) {
@@ -342,7 +346,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                 }
                 if (!response.ok) {
                     const errorData = await response.json().catch(() => ({ error: 'An unknown error occurred.' }));
-                    throw new Error(errorData.error || \`Request failed with status \${response.status}\`);
+                    throw new Error(errorData.error || `Request failed with status ${response.status}`);
                 }
                 return response.status === 204 ? null : response.json();
             }
@@ -358,56 +362,56 @@ const adminPanelHTML = `<!DOCTYPE html>
             const pad = num => num.toString().padStart(2, '0');
             const localToUTC = (d, t) => {
                 if (!d || !t) return { utcDate: '', utcTime: '' };
-                const dt = new Date(\`\${d}T\${t}\`);
-                return { utcDate: \`\${dt.getUTCFullYear()}-\${pad(dt.getUTCMonth() + 1)}-\${pad(dt.getUTCDate())}\`, utcTime: \`\${pad(dt.getUTCHours())}:\${pad(dt.getUTCMinutes())}:\${pad(dt.getUTCSeconds())}\` };
+                const dt = new Date(`${d}T${t}`);
+                return { utcDate: `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`, utcTime: `${pad(dt.getUTCHours())}:${pad(dt.getUTCMinutes())}:${pad(dt.getUTCSeconds())}` };
             };
             const utcToLocal = (d, t) => {
                 if (!d || !t) return { localDate: '', localTime: '' };
-                const dt = new Date(\`\${d}T\${t}Z\`);
-                return { localDate: \`\${dt.getFullYear()}-\${pad(dt.getMonth() + 1)}-\${pad(dt.getDate())}\`, localTime: \`\${pad(dt.getHours())}:\${pad(dt.getMinutes())}:\${pad(dt.getSeconds())}\` };
+                const dt = new Date(`${d}T${t}Z`);
+                return { localDate: `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}`, localTime: `${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}` };
             };
             
             function bytesToReadable(bytes) {
                 if (bytes <= 0) return '0 Bytes';
                 const i = Math.floor(Math.log(bytes) / Math.log(1024));
-                return \`\${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} \${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}\`;
+                return `${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} ${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}`;
             }
 
             function renderStats(stats) {
                 const statsContainer = document.getElementById('stats');
-                statsContainer.innerHTML = \`
-                    <div class="stat-card"><h3 class="stat-title">Total Users</h3><p class="stat-value">\${stats.totalUsers}</p></div>
-                    <div class="stat-card"><h3 class="stat-title">Active Users</h3><p class="stat-value">\${stats.activeUsers}</p></div>
-                    <div class="stat-card"><h3 class="stat-title">Expired Users</h3><p class="stat-value">\${stats.expiredUsers}</p></div>
-                    <div class="stat-card"><h3 class="stat-title">Total Traffic Used</h3><p class="stat-value">\${bytesToReadable(stats.totalTraffic)}</p></div>
-                \`;
+                statsContainer.innerHTML = `
+                    <div class="stat-card"><h3 class="stat-title">Total Users</h3><p class="stat-value">${stats.totalUsers}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Active Users</h3><p class="stat-value">${stats.activeUsers}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Expired Users</h3><p class="stat-value">${stats.expiredUsers}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Total Traffic Used</h3><p class="stat-value">${bytesToReadable(stats.totalTraffic)}</p></div>
+                `;
             }
             
             function renderUsers(users) {
                 const userList = document.getElementById('userList');
                 userList.innerHTML = users.length === 0 ? '<tr><td colspan="7" style="text-align:center;">No users found.</td></tr>' : users.map(user => {
-                    const expiryUTC = new Date(\`\${user.expiration_date}T\${user.expiration_time}Z\`);
+                    const expiryUTC = new Date(`${user.expiration_date}T${user.expiration_time}Z`);
                     const isExpired = expiryUTC < new Date();
-                    const trafficUsage = user.data_limit > 0 ? \`\${bytesToReadable(user.data_usage)} / \${bytesToReadable(user.data_limit)}\` : \`\${bytesToReadable(user.data_usage)} / &infin;\`;
+                    const trafficUsage = user.data_limit > 0 ? `${bytesToReadable(user.data_usage)} / ${bytesToReadable(user.data_limit)}` : `${bytesToReadable(user.data_usage)} / &infin;`;
                     const trafficPercent = user.data_limit > 0 ? Math.min(100, (user.data_usage / user.data_limit * 100)) : 0;
                     
-                    return \`
-                        <tr data-uuid="\${user.uuid}">
-                            <td title="\${user.uuid}">\${user.uuid.substring(0, 8)}...<button class="btn-copy-uuid" title="Copy UUID">📋</button></td>
-                            <td>\${new Date(user.created_at).toLocaleString()}</td>
-                            <td>\${expiryUTC.toLocaleString()}</td>
-                            <td><span class="status-badge \${isExpired ? 'status-expired' : 'status-active' }">\${isExpired ? 'Expired' : 'Active'}</span></td>
+                    return `
+                        <tr data-uuid="${user.uuid}">
+                            <td title="${user.uuid}">${user.uuid.substring(0, 8)}...<button class="btn-copy-uuid" title="Copy UUID">📋</button></td>
+                            <td>${new Date(user.created_at).toLocaleString()}</td>
+                            <td>${expiryUTC.toLocaleString()}</td>
+                            <td><span class="status-badge ${isExpired ? 'status-expired' : 'status-active' }">${isExpired ? 'Expired' : 'Active'}</span></td>
                             <td>
-                                \${trafficUsage}
-                                <div class="traffic-bar"><div class="traffic-bar-inner" style="width: \${trafficPercent}%;"></div></div>
+                                ${trafficUsage}
+                                <div class="traffic-bar"><div class="traffic-bar-inner" style="width: ${trafficPercent}%;"></div></div>
                             </td>
-                            <td>\${user.notes || '-'}</td>
+                            <td>${user.notes || '-'}</td>
                             <td class="actions-cell">
                                 <button class="btn btn-secondary btn-edit">Edit</button>
                                 <button class="btn btn-danger btn-delete">Delete</button>
                             </td>
                         </tr>
-                    \`;
+                    `;
                 }).join('');
             }
 
@@ -483,8 +487,8 @@ const adminPanelHTML = `<!DOCTYPE html>
                     document.getElementById('resetTraffic').checked = false;
                     editModal.classList.add('show');
                 } else if (button.classList.contains('btn-delete')) {
-                    if (confirm(\`Are you sure you want to delete user \${uuid.substring(0,8)}...?\`)) {
-                        api.delete(\`/users/\${uuid}\`).then(() => {
+                    if (confirm(`Are you sure you want to delete user ${uuid.substring(0,8)}...?`)) {
+                        api.delete(`/users/${uuid}`).then(() => {
                             showToast('User deleted successfully!');
                             refreshData();
                         }).catch(err => showToast(err.message, true));
@@ -504,7 +508,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                     reset_traffic: document.getElementById('resetTraffic').checked,
                 };
                 try {
-                    await api.put(\`/users/\${uuid}\`, updatedData);
+                    await api.put(`/users/${uuid}`, updatedData);
                     showToast('User updated successfully!');
                     editModal.classList.remove('show');
                     refreshData();
@@ -524,8 +528,8 @@ const adminPanelHTML = `<!DOCTYPE html>
             const setDefaultExpiry = () => {
                 const now = new Date();
                 now.setMonth(now.getMonth() + 1);
-                document.getElementById('expiryDate').value = \`\${now.getFullYear()}-\${pad(now.getMonth() + 1)}-\${pad(now.getDate())}\`;
-                document.getElementById('expiryTime').value = \`\${pad(now.getHours())}:\${pad(now.getMinutes())}:\${pad(now.getSeconds())}\`;
+                document.getElementById('expiryDate').value = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+                document.getElementById('expiryTime').value = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
             };
             
             document.getElementById('uuid').value = crypto.randomUUID();
@@ -644,8 +648,10 @@ async function handleAdminRequest(request, env, cfg, ctx) {
       return new Response('Admin panel is not fully configured. Please ensure D1 (DB) and KV (USER_KV) bindings are set.', { status: 503 });
   }
 
-  const apiBasePath = `${cfg.adminPath}/api`;
-
+  // [FIX] Sanitize admin path to prevent double slash (//) errors
+  const cleanAdminPath = cfg.adminPath.endsWith('/') ? cfg.adminPath.slice(0, -1) : cfg.adminPath;
+  const apiBasePath = `${cleanAdminPath}/api`;
+  
   // --- API Routes (/admin/api/*) ---
   if (pathname.startsWith(apiBasePath)) {
     const { isAdmin, errorResponse } = await checkAdminAuth(request, env, cfg);
@@ -759,20 +765,42 @@ async function handleAdminRequest(request, env, cfg, ctx) {
   if (pathname === cfg.adminPath) {
     // Handle login POST
     if (request.method === 'POST') {
+      const cookieHeader = request.headers.get('Cookie');
+      const loginCsrfToken = cookieHeader?.match(/login_csrf_token=([^;]+)/)?.[1];
+      
       const formData = await request.formData();
+      const formCsrfToken = formData.get('csrf_token');
+
+      // [SECURITY FIX] Validate CSRF token for the login form
+      if (!loginCsrfToken || !formCsrfToken || loginCsrfToken !== formCsrfToken) {
+        // Return to login page with an error
+        const errorHtml = adminLoginHTML.replace('</form>', '</form><p class="error">Invalid session or request. Please try again.</p>');
+        const headers = new Headers({ 'Content-Type': 'text/html;charset=utf-8' });
+        // Clear the bad/expired CSRF cookie
+        headers.append('Set-Cookie', `login_csrf_token=; Path=${cfg.adminPath}; Expires=Thu, 01 Jan 1970 00:00:00 GMT`);
+        return new Response(errorHtml, { status: 403, headers });
+      }
+
       if (formData.get('password') === env.ADMIN_KEY) {
         const sessionToken = crypto.randomUUID();
-        const csrfToken = crypto.randomUUID();
+        const csrfToken = crypto.randomUUID(); // This is the API CSRF token
         // Store session for 24 hours (86400 seconds) - NON-BLOCKING
         ctx.waitUntil(env.USER_KV.put(`admin_session:${sessionToken}`, JSON.stringify({ csrfToken }), { expirationTtl: 86400 }));
         
         const headers = new Headers({
-          'Location': cfg.adminPath, // Redirect to /admin (JS fix handles trailing slash)
+          'Location': cfg.adminPath, // Redirect to /admin
           'Set-Cookie': `auth_token=${sessionToken}; HttpOnly; Secure; Path=${cfg.adminPath}; Max-Age=86400; SameSite=Strict`
         });
+        
+        // [SECURITY FIX] Clear the login CSRF cookie after successful login
+        headers.append('Set-Cookie', `login_csrf_token=; Path=${cfg.adminPath}; Expires=Thu, 01 Jan 1970 00:00:00 GMT`);
+        
         return new Response(null, { status: 302, headers });
       } else {
-        return new Response(adminLoginHTML.replace('</form>', '</form><p class="error">Invalid password.</p>'), { status: 401, headers: { 'Content-Type': 'text/html;charset=utf-8' } });
+        // [SECURITY FIX] Clear the login CSRF cookie after failed login
+        const headers = new Headers({ 'Content-Type': 'text/html;charset=utf-8' });
+        headers.append('Set-Cookie', `login_csrf_token=; Path=${cfg.adminPath}; Expires=Thu, 01 Jan 1970 00:00:00 GMT`);
+        return new Response(adminLoginHTML.replace('</form>', '</form><p class="error">Invalid password.</p>'), { status: 401, headers });
       }
     }
     
@@ -789,7 +817,17 @@ async function handleAdminRequest(request, env, cfg, ctx) {
           );
         return new Response(panelWithCsrf, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
       } else {
-        return new Response(adminLoginHTML, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
+        // [SECURITY FIX] Create and set CSRF token for the login form
+        const loginCsrfToken = crypto.randomUUID();
+        const loginHtmlWithCsrf = adminLoginHTML.replace(
+          '</form>',
+          `<input type="hidden" name="csrf_token" value="${loginCsrfToken}"></form>`
+        );
+        const headers = new Headers({ 'Content-Type': 'text/html;charset=utf-8' });
+        // Set this cookie for 10 minutes (600 seconds)
+        headers.append('Set-Cookie', `login_csrf_token=${loginCsrfToken}; HttpOnly; Secure; Path=${cfg.adminPath}; Max-Age=600; SameSite=Strict`);
+        
+        return new Response(loginHtmlWithCsrf, { headers });
       }
     }
     return new Response('Method Not Allowed', { status: 405 });
@@ -1936,7 +1974,7 @@ function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsa
                     if (Math.abs(diffSeconds) < 3600) relTime = rtf.format(Math.round(diffSeconds / 60), 'minute');
                     else if (Math.abs(diffSeconds) < 86400) relTime = rtf.format(Math.round(diffSeconds / 3600), 'hour');
                     else relTime = rtf.format(Math.round(diffSeconds / 86400), 'day');
-                    relativeElement.textContent = \`Expires \${relTime}\`;
+                    relativeElement.textContent = `Expires ${relTime}`;
                 } else if (isExpired && !relativeElement.textContent.includes("Expired") && !relativeElement.textContent.includes("Reached")) {
                     relativeElement.textContent = "Subscription Expired";
                     relativeElement.classList.add('status-expired-text');
@@ -1944,7 +1982,7 @@ function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsa
                 }
                 document.getElementById('local-time').textContent = utcDate.toLocaleString(undefined, { timeZoneName: 'short' });
                 document.getElementById('tehran-time').textContent = utcDate.toLocaleString('en-US', { timeZone: 'Asia/Tehran', hour12: true, year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-                document.getElementById('utc-time').textContent = \`\${utcDate.toISOString().substring(0, 19).replace('T', ' ')} UTC\`;
+                document.getElementById('utc-time').textContent = `${utcDate.toISOString().substring(0, 19).replace('T', ' ')} UTC`;
             }
             function displayDataUsage() {
                 const usageElement = document.getElementById('data-usage-display');
@@ -1953,10 +1991,10 @@ function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsa
                 const bytesToReadable = bytes => {
                     if (bytes <= 0) return '0 Bytes';
                     const i = Math.floor(Math.log(bytes) / Math.log(1024));
-                    return \`\${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} \${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}\`;
+                    return `${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} ${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}`;
                 };
                 const limitText = limit > 0 ? bytesToReadable(limit) : '&infin;';
-                usageElement.innerHTML = \`\${bytesToReadable(usage)} / \${limitText}\`;
+                usageElement.innerHTML = `${bytesToReadable(usage)} / ${limitText}`;
             }
             async function fetchNetworkInfo() {
                 try {
@@ -1964,11 +2002,11 @@ function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsa
                     const data = await response.json();
                     
                     document.getElementById('proxy-ip').textContent = data.proxy?.ip || 'N/A';
-                    document.getElementById('proxy-location').textContent = \`\${data.proxy?.city || ''}\${data.proxy?.city && data.proxy?.country ? ', ' : ''}\${data.proxy?.country || 'N/A'}\`;
+                    document.getElementById('proxy-location').textContent = `${data.proxy?.city || ''}${data.proxy?.city && data.proxy?.country ? ', ' : ''}${data.proxy?.country || 'N/A'}`;
                     document.getElementById('proxy-isp').textContent = data.proxy?.isp || 'N/A';
                     
                     document.getElementById('user-ip').textContent = data.user?.ip || 'N/A';
-                    document.getElementById('user-location').textContent = \`\${data.user?.city || ''}\${data.user?.city && data.user?.country ? ', ' : ''}\${data.user?.country || 'N/A'}\`;
+                    document.getElementById('user-location').textContent = `${data.user?.city || ''}${data.user?.city && data.user?.country ? ', ' : ''}${data.user?.country || 'N/A'}`;
                     document.getElementById('user-isp').textContent = data.user?.isp || 'N/A';
                     document.getElementById('user-risk').textContent = data.user?.risk || 'N/A';
                     
