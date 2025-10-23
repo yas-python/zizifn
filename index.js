@@ -337,11 +337,11 @@ const adminPanelHTML = `<!DOCTYPE html>
             const apiHeaders = { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken };
             
             const api = {
-                // [FIX] Escaped template literals
-                get: (endpoint) => fetch(\`\\$\${API_BASE}\\$\${endpoint}\`).then(handleResponse),
-                post: (endpoint, body) => fetch(\`\\$\${API_BASE}\\$\${endpoint}\`, { method: 'POST', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
-                put: (endpoint, body) => fetch(\`\\$\${API_BASE}\\$\${endpoint}\`, { method: 'PUT', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
-                delete: (endpoint) => fetch(\`\\$\${API_BASE}\\$\${endpoint}\`, { method: 'DELETE', headers: apiHeaders }).then(handleResponse),
+                // [GEMINI FIX] Corrected escaped template literals
+                get: (endpoint) => fetch(\`\${API_BASE}\${endpoint}\`).then(handleResponse),
+                post: (endpoint, body) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'POST', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
+                put: (endpoint, body) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'PUT', headers: apiHeaders, body: JSON.stringify(body) }).then(handleResponse),
+                delete: (endpoint) => fetch(\`\${API_BASE}\${endpoint}\`, { method: 'DELETE', headers: apiHeaders }).then(handleResponse),
             };
             
             async function handleResponse(response) {
@@ -351,8 +351,8 @@ const adminPanelHTML = `<!DOCTYPE html>
                 }
                 if (!response.ok) {
                     const errorData = await response.json().catch(() => ({ error: 'An unknown error occurred.' }));
-                    // [FIX] Escaped template literals
-                    throw new Error(errorData.error || \`Request failed with status \\$\${response.status}\`);
+                    // [GEMINI FIX] Corrected escaped template literals
+                    throw new Error(errorData.error || \`Request failed with status \${response.status}\`);
                 }
                 return response.status === 204 ? null : response.json();
             }
@@ -368,64 +368,64 @@ const adminPanelHTML = `<!DOCTYPE html>
             const pad = num => num.toString().padStart(2, '0');
             const localToUTC = (d, t) => {
                 if (!d || !t) return { utcDate: '', utcTime: '' };
-                // [FIX] Escaped template literals
-                const dt = new Date(\`\\$\${d}T\\$\${t}\`);
+                // [GEMINI FIX] Corrected escaped template literals
+                const dt = new Date(\`\${d}T\${t}\`);
                 return { 
-                    // [FIX] Escaped template literals
-                    utcDate: \`\\$\${dt.getUTCFullYear()}-\\$\${pad(dt.getUTCMonth() + 1)}-\\$\${pad(dt.getUTCDate())}\`, 
-                    utcTime: \`\\$\${pad(dt.getUTCHours())}:\\$\${pad(dt.getUTCMinutes())}:\\$\${pad(dt.getUTCSeconds())}\` 
+                    // [GEMINI FIX] Corrected escaped template literals
+                    utcDate: \`\${dt.getUTCFullYear()}-\${pad(dt.getUTCMonth() + 1)}-\${pad(dt.getUTCDate())}\`, 
+                    utcTime: \`\${pad(dt.getUTCHours())}:\${pad(dt.getUTCMinutes())}:\${pad(dt.getUTCSeconds())}\` 
                 };
             };
             const utcToLocal = (d, t) => {
                 if (!d || !t) return { localDate: '', localTime: '' };
-                // [FIX] Escaped template literals
-                const dt = new Date(\`\\$\${d}T\\$\${t}Z\`);
+                // [GEMINI FIX] Corrected escaped template literals
+                const dt = new Date(\`\${d}T\${t}Z\`);
                 return { 
-                    // [FIX] Escaped template literals
-                    localDate: \`\\$\${dt.getFullYear()}-\\$\${pad(dt.getMonth() + 1)}-\\$\${pad(dt.getDate())}\`, 
-                    localTime: \`\\$\${pad(dt.getHours())}:\\$\${pad(dt.getMinutes())}:\\$\${pad(dt.getSeconds())}\` 
+                    // [GEMINI FIX] Corrected escaped template literals
+                    localDate: \`\${dt.getFullYear()}-\${pad(dt.getMonth() + 1)}-\${pad(dt.getDate())}\`, 
+                    localTime: \`\${pad(dt.getHours())}:\${pad(dt.getMinutes())}:\${pad(dt.getSeconds())}\` 
                 };
             };
             
             function bytesToReadable(bytes) {
                 if (bytes <= 0) return '0 Bytes';
                 const i = Math.floor(Math.log(bytes) / Math.log(1024));
-                // [FIX] Escaped template literals
-                return \`\\$\${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} \\$\${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}\`;
+                // [GEMINI FIX] Corrected escaped template literals
+                return \`\${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} \${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}\`;
             }
 
             function renderStats(stats) {
                 const statsContainer = document.getElementById('stats');
-                // [FIX] Escaped template literals
+                // [GEMINI FIX] Corrected escaped template literals
                 statsContainer.innerHTML = \`
-                    <div class="stat-card"><h3 class="stat-title">Total Users</h3><p class="stat-value">\\$\${stats.totalUsers}</p></div>
-                    <div class="stat-card"><h3 class="stat-title">Active Users</h3><p class="stat-value">\\$\${stats.activeUsers}</p></div>
-                    <div class="stat-card"><h3 class="stat-title">Expired Users</h3><p class="stat-value">\\$\${stats.expiredUsers}</p></div>
-                    <div class="stat-card"><h3 class="stat-title">Total Traffic Used</h3><p class="stat-value">\\$\${bytesToReadable(stats.totalTraffic)}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Total Users</h3><p class="stat-value">\${stats.totalUsers}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Active Users</h3><p class="stat-value">\${stats.activeUsers}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Expired Users</h3><p class="stat-value">\${stats.expiredUsers}</p></div>
+                    <div class="stat-card"><h3 class="stat-title">Total Traffic Used</h3><p class="stat-value">\${bytesToReadable(stats.totalTraffic)}</p></div>
                 \`;
             }
             
             function renderUsers(users) {
                 const userList = document.getElementById('userList');
-                // [FIX] Escaped template literals
+                // [GEMINI FIX] Corrected escaped template literals
                 userList.innerHTML = users.length === 0 ? '<tr><td colspan="7" style="text-align:center;">No users found.</td></tr>' : users.map(user => {
-                    const expiryUTC = new Date(\`\\$\${user.expiration_date}T\\$\${user.expiration_time}Z\`);
+                    const expiryUTC = new Date(\`\${user.expiration_date}T\${user.expiration_time}Z\`);
                     const isExpired = expiryUTC < new Date();
-                    const trafficUsage = user.data_limit > 0 ? \`\\$\${bytesToReadable(user.data_usage)} / \\$\${bytesToReadable(user.data_limit)}\` : \`\\$\${bytesToReadable(user.data_usage)} / &infin;\`;
+                    const trafficUsage = user.data_limit > 0 ? \`\${bytesToReadable(user.data_usage)} / \${bytesToReadable(user.data_limit)}\` : \`\${bytesToReadable(user.data_usage)} / &infin;\`;
                     const trafficPercent = user.data_limit > 0 ? Math.min(100, (user.data_usage / user.data_limit * 100)) : 0;
                     
-                    // [FIX] Escaped template literals
+                    // [GEMINI FIX] Corrected escaped template literals
                     return \`
-                        <tr data-uuid="\\$\${user.uuid}">
-                            <td title="\\$\${user.uuid}">\\$\${user.uuid.substring(0, 8)}...<button class="btn-copy-uuid" title="Copy UUID">📋</button></td>
-                            <td>\\$\${new Date(user.created_at).toLocaleString()}</td>
-                            <td>\\$\${expiryUTC.toLocaleString()}</td>
-                            <td><span class="status-badge \\$\${isExpired ? 'status-expired' : 'status-active' }">\\$\${isExpired ? 'Expired' : 'Active'}</span></td>
+                        <tr data-uuid="\${user.uuid}">
+                            <td title="\${user.uuid}">\${user.uuid.substring(0, 8)}...<button class="btn-copy-uuid" title="Copy UUID">📋</button></td>
+                            <td>\${new Date(user.created_at).toLocaleString()}</td>
+                            <td>\${expiryUTC.toLocaleString()}</td>
+                            <td><span class="status-badge \${isExpired ? 'status-expired' : 'status-active' }">\${isExpired ? 'Expired' : 'Active'}</span></td>
                             <td>
-                                \\$\${trafficUsage}
-                                <div class="traffic-bar"><div class="traffic-bar-inner" style="width: \\$\${trafficPercent}%;"></div></div>
+                                \${trafficUsage}
+                                <div class="traffic-bar"><div class="traffic-bar-inner" style="width: \${trafficPercent}%;"></div></div>
                             </td>
-                            <td>\\$\${user.notes || '-'}</td>
+                            <td>\${user.notes || '-'}</td>
                             <td class="actions-cell">
                                 <button class="btn btn-secondary btn-edit">Edit</button>
                                 <button class="btn btn-danger btn-delete">Delete</button>
@@ -514,7 +514,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                 } else if (button.classList.contains('btn-edit')) {
                     const user = window.allUsers.find(u => u.uuid === uuid);
                     if (!user) return;
-                    // [FIX] Escaped template literals
+                    // [GEMINI FIX] Corrected escaped template literals
                     const { localDate, localTime } = utcToLocal(user.expiration_date, user.expiration_time);
                     document.getElementById('editUuid').value = user.uuid;
                     document.getElementById('editExpiryDate').value = localDate;
@@ -524,9 +524,9 @@ const adminPanelHTML = `<!DOCTYPE html>
                     document.getElementById('resetTraffic').checked = false;
                     editModal.classList.add('show');
                 } else if (button.classList.contains('btn-delete')) {
-                    // [FIX] Escaped template literals
-                    if (confirm(\`Are you sure you want to delete user \\$\${uuid.substring(0,8)}...?\`)) {
-                        api.delete(\`/users/\\$\${uuid}\`).then(() => {
+                    // [GEMINI FIX] Corrected escaped template literals
+                    if (confirm(\`Are you sure you want to delete user \${uuid.substring(0,8)}...?\`)) {
+                        api.delete(\`/users/\${uuid}\`).then(() => {
                             showToast('User deleted successfully!');
                             refreshData();
                         }).catch(err => showToast(err.message, true));
@@ -546,8 +546,8 @@ const adminPanelHTML = `<!DOCTYPE html>
                     reset_traffic: document.getElementById('resetTraffic').checked,
                 };
                 try {
-                    // [FIX] Escaped template literals
-                    await api.put(\`/users/\\$\${uuid}\`, updatedData);
+                    // [GEMINI FIX] Corrected escaped template literals
+                    await api.put(\`/users/\${uuid}\`, updatedData);
                     showToast('User updated successfully!');
                     editModal.classList.remove('show');
                     refreshData();
@@ -567,9 +567,9 @@ const adminPanelHTML = `<!DOCTYPE html>
             const setDefaultExpiry = () => {
                 const now = new Date();
                 now.setMonth(now.getMonth() + 1);
-                // [FIX] Escaped template literals
-                document.getElementById('expiryDate').value = \`\\$\${now.getFullYear()}-\\$\${pad(now.getMonth() + 1)}-\\$\${pad(now.getDate())}\`;
-                document.getElementById('expiryTime').value = \`\\$\${pad(now.getHours())}:\\$\${pad(now.getMinutes())}:\\$\${pad(now.getSeconds())}\`;
+                // [GEMINI FIX] Corrected escaped template literals
+                document.getElementById('expiryDate').value = \`\${now.getFullYear()}-\${pad(now.getMonth() + 1)}-\${pad(now.getDate())}\`;
+                document.getElementById('expiryTime').value = \`\${pad(now.getHours())}:\${pad(now.getMinutes())}:\${pad(now.getSeconds())}\`;
             };
             
             document.getElementById('uuid').value = crypto.randomUUID();
@@ -1850,12 +1850,12 @@ async function handleConfigPage(userID, hostName, proxyAddress, userData, userIP
 function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsage, dataLimit) {
     const subXrayUrl = `https://${hostName}/xray/${userID}`;
     const subSbUrl = `https://${hostName}/sb/${userID}`;
-    // [FIX] This is server-side JS, so ${...} is correct.
+    // This is server-side JS, so ${...} is correct.
     const clashMetaUrl = `clash://install-config?url=${encodeURIComponent(subSbUrl)}`;
     
     // Ensure time part has seconds for Date object creation
     const expTimeSeconds = expTime.includes(':') && expTime.split(':').length === 2 ? `${expTime}:00` : expTime;
-    // [FIX] This is server-side JS, so ${...} is correct.
+    // This is server-side JS, so ${...} is correct.
     const utcTimestamp = `${expDate}T${expTimeSeconds.split('.')[0]}Z`;
 
     const isUserExpired = isExpired(expDate, expTime);
@@ -1876,7 +1876,7 @@ function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsa
 
     const trafficPercent = hasDataLimit ? Math.min(100, (dataUsage / dataLimit * 100)) : 0;
 
-    // [FIX] This is server-side JS, so ${...} is correct.
+    // This is server-side JS, so ${...} is correct.
     const html = `<!doctype html>
     <html lang="en">
     <head>
@@ -2044,8 +2044,8 @@ function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsa
                     if (Math.abs(diffSeconds) < 3600) relTime = rtf.format(Math.round(diffSeconds / 60), 'minute');
                     else if (Math.abs(diffSeconds) < 86400) relTime = rtf.format(Math.round(diffSeconds / 3600), 'hour');
                     else relTime = rtf.format(Math.round(diffSeconds / 86400), 'day');
-                    // [FIX] Escaped template literals
-                    relativeElement.textContent = \`Expires \\$\${relTime}\`;
+                    // [GEMINI FIX] Corrected escaped template literals
+                    relativeElement.textContent = \`Expires \${relTime}\`;
                 } else if (isExpired && !relativeElement.textContent.includes("Expired") && !relativeElement.textContent.includes("Reached")) {
                     relativeElement.textContent = "Subscription Expired";
                     relativeElement.classList.add('status-expired-text');
@@ -2053,8 +2053,8 @@ function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsa
                 }
                 document.getElementById('local-time').textContent = utcDate.toLocaleString(undefined, { timeZoneName: 'short' });
                 document.getElementById('tehran-time').textContent = utcDate.toLocaleString('en-US', { timeZone: 'Asia/Tehran', hour12: true, year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-                // [FIX] Escaped template literals
-                document.getElementById('utc-time').textContent = \`\\$\${utcDate.toISOString().substring(0, 19).replace('T', ' ')} UTC\`;
+                // [GEMINI FIX] Corrected escaped template literals
+                document.getElementById('utc-time').textContent = \`\${utcDate.toISOString().substring(0, 19).replace('T', ' ')} UTC\`;
             }
             function displayDataUsage() {
                 const usageElement = document.getElementById('data-usage-display');
@@ -2063,12 +2063,12 @@ function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsa
                 const bytesToReadable = bytes => {
                     if (bytes <= 0) return '0 Bytes';
                     const i = Math.floor(Math.log(bytes) / Math.log(1024));
-                    // [FIX] Escaped template literals
-                    return \`\\$\${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} \\$\${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}\`;
+                    // [GEMINI FIX] Corrected escaped template literals
+                    return \`\${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} \${['Bytes', 'KB', 'MB', 'GB', 'TB'][i]}\`;
                 };
                 const limitText = limit > 0 ? bytesToReadable(limit) : '&infin;';
-                // [FIX] Escaped template literals
-                usageElement.innerHTML = \`\\$\${bytesToReadable(usage)} / \\$\${limitText}\`;
+                // [GEMINI FIX] Corrected escaped template literals
+                usageElement.innerHTML = \`\${bytesToReadable(usage)} / \${limitText}\`;
             }
             async function fetchNetworkInfo() {
                 try {
@@ -2076,11 +2076,13 @@ function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsa
                     const data = await response.json();
                     
                     document.getElementById('proxy-ip').textContent = data.proxy?.ip || 'N/A';
-                    document.getElementById('proxy-location').textContent = \`\\$\${data.proxy?.city || ''}\\$\${data.proxy?.city && data.proxy?.country ? ', ' : ''}\\$\${data.proxy?.country || 'N/A'}\`;
+                    // [GEMINI FIX] Corrected escaped template literals
+                    document.getElementById('proxy-location').textContent = \`\${data.proxy?.city || ''}\${data.proxy?.city && data.proxy?.country ? ', ' : ''}\${data.proxy?.country || 'N/A'}\`;
                     document.getElementById('proxy-isp').textContent = data.proxy?.isp || 'N/A';
                     
                     document.getElementById('user-ip').textContent = data.user?.ip || 'N/A';
-                    document.getElementById('user-location').textContent = \`\\$\${data.user?.city || ''}\\$\${data.user?.city && data.user?.country ? ', ' : ''}\\$\${data.user?.country || 'N/A'}\`;
+                    // [GEMINI FIX] Corrected escaped template literals
+                    document.getElementById('user-location').textContent = \`\${data.user?.city || ''}\${data.user?.city && data.user?.country ? ', ' : ''}\${data.user?.country || 'N/A'}\`;
                     document.getElementById('user-isp').textContent = data.user?.isp || 'N/A';
                     document.getElementById('user-risk').textContent = data.user?.risk || 'N/A';
                     
