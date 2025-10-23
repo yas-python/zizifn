@@ -1132,6 +1132,7 @@ async function ProtocolOverWSHandler(request, env, ctx) {
   let portWithRandomLog = '';
   let sessionUsage = 0; // in-memory counter for this session
   let userUUID = '';
+  let udpStreamWriter = null; // <-- [FIX] Added from Script 1 logic
 
   const log = (info, event) => console.log(`[${address}:${portWithRandomLog}] ${info}`, event || '');
   
@@ -1182,16 +1183,23 @@ async function ProtocolOverWSHandler(request, env, ctx) {
   const earlyDataHeader = request.headers.get('Sec-WebSocket-Protocol') || '';
   const readableWebSocketStream = MakeReadableWebSocketStream(webSocket, earlyDataHeader, log);
   let remoteSocketWapper = { value: null };
-  let isDns = false;
+  // let isDns = false; // <-- [FIX] Removed from Script 2
 
   readableWebSocketStream
     .pipeThrough(usageCounterDownstream) // Count downstream traffic
     .pipeTo(
       new WritableStream({
         async write(chunk, controller) {
-          if (isDns) {
-            return; // DNS stream is already handled
+          // --- [FIX] Added from Script 1 ---
+          if (udpStreamWriter) {
+            return udpStreamWriter.write(chunk);
           }
+          // --- [FIX] End ---
+          
+          // if (isDns) { // <-- [FIX] Removed from Script 2
+          //   return; 
+          // }
+
           if (remoteSocketWapper.value) {
             const writer = remoteSocketWapper.value.writable.getWriter();
             await writer.write(chunk);
@@ -1238,10 +1246,13 @@ async function ProtocolOverWSHandler(request, env, ctx) {
 
           if (isUDP) {
             if (portRemote === 53) {
-              isDns = true;
-              // --- FIX: Pass a callback to update usage instead of the stream ---
+              // --- [FIX] Merged Logic ---
+              // isDns = true; // <-- [FIX] Removed
               const updateUpstreamUsage = (bytes) => { sessionUsage += bytes; };
-              await createDnsPipeline(rawClientData, webSocket, vlessResponseHeader, log, updateUpstreamUsage);
+              const dnsPipeline = await createDnsPipeline(webSocket, vlessResponseHeader, log, updateUpstreamUsage); // <-- [FIX] Modified createDnsPipeline
+              udpStreamWriter = dnsPipeline.write;
+              udpStreamWriter(rawClientData);
+              // --- [FIX] End Merged Logic ---
             } else {
               controller.error(new Error('UDP proxy only for DNS (port 53)'));
             }
@@ -1523,31 +1534,18 @@ function safeCloseWebSocket(socket) {
 
 /**
 * Handles DNS (UDP port 53) requests.
-* @param {Uint8Array} rawClientData
 * @param {WebSocket} webSocket
 * @param {Uint8Array} vlessResponseHeader
 * @param {function} log
 * @param {function} updateUpstreamUsage - Callback to update traffic usage
 */
-async function createDnsPipeline(rawClientData, webSocket, vlessResponseHeader, log, updateUpstreamUsage) {
-  const readable = new ReadableStream({
-    start(controller) {
-      controller.enqueue(rawClientData);
-      webSocket.addEventListener('message', (event) => {
-        try {
-          // Downstream usage is already counted by the pipe in ProtocolOverWSHandler
-          controller.enqueue(event.data);
-        } catch (e) {
-          controller.error(e);
-        }
-      });
-      webSocket.addEventListener('close', () => controller.close());
-      webSocket.addEventListener('error', (err) => controller.error(err));
-    },
-  });
-
+// --- [FIX] This function is now modified to return a writer, matching Script 1's logic ---
+async function createDnsPipeline(webSocket, vlessResponseHeader, log, updateUpstreamUsage) {
+  // [FIX] Removed the ReadableStream wrapper that listened on the websocket
+  
   const transformStream = new TransformStream({
     transform(chunk, controller) {
+      // Parse UDP packets from VLESS framing
       for (let index = 0; index < chunk.byteLength;) {
         const lengthBuffer = chunk.slice(index, index + 2);
         const udpPacketLength = new DataView(lengthBuffer).getUint16(0);
@@ -1560,12 +1558,13 @@ async function createDnsPipeline(rawClientData, webSocket, vlessResponseHeader, 
 
   let isHeaderSent = false;
   try {
-    await readable.pipeThrough(transformStream).pipeTo(
+    // [FIX] Changed from 'readable.pipeThrough(transformStream)' to just 'transformStream.readable'
+    await transformStream.readable.pipeTo(
       new WritableStream({
         async write(chunk) {
           try {
-            // Forward DNS query to 1.1.1.1
-            const resp = await fetch('https://1.1.1.1/dns-query', {
+            // Send DNS query using DoH
+            const resp = await fetch(`https://1.1.1.1/dns-query`, {
               method: 'POST',
               headers: { 'content-type': 'application/dns-message' },
               body: chunk,
@@ -1573,15 +1572,16 @@ async function createDnsPipeline(rawClientData, webSocket, vlessResponseHeader, 
             const dnsQueryResult = await resp.arrayBuffer();
             const udpSize = dnsQueryResult.byteLength;
             const udpSizeBuffer = new Uint8Array([(udpSize >> 8) & 0xff, udpSize & 0xff]);
-            
+
             if (webSocket.readyState === CONST.WS_READY_STATE_OPEN) {
+              log(`DNS query successful, length: ${udpSize}`);
               const blob = isHeaderSent
                 ? new Blob([udpSizeBuffer, dnsQueryResult])
                 : new Blob([vlessResponseHeader, udpSizeBuffer, dnsQueryResult]);
-              
+
               const responseChunk = await blob.arrayBuffer();
               
-              // CRITICAL FIX: Update usage with the actual response chunk size
+              // CRITICAL: Update usage with the actual response chunk size
               updateUpstreamUsage(responseChunk.byteLength); 
               webSocket.send(responseChunk);
               
@@ -1599,7 +1599,15 @@ async function createDnsPipeline(rawClientData, webSocket, vlessResponseHeader, 
   } catch (e) {
     log('DNS stream error: ' + e);
   }
+
+  // --- [FIX] Added from Script 1 logic ---
+  const writer = transformStream.writable.getWriter();
+  return {
+    write: (chunk) => writer.write(chunk),
+  };
+  // --- [FIX] End ---
 }
+
 
 // --- Smart Config Page Generation (New) ---
 
