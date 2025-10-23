@@ -1091,7 +1091,8 @@ export default {
       if (!env.DB || !env.USER_KV) {
           return new Response('VLESS proxy is not fully configured. Missing D1 or KV bindings.', { status: 503 });
       }
-      return ProtocolOverWSHandler(request, env, ctx);
+      // [FIX] Pass cfg to the handler
+      return ProtocolOverWSHandler(request, env, ctx, cfg);
     }
     
     // --- 4. Network Info API (for config page) ---
@@ -1163,9 +1164,10 @@ export default {
 * @param {Request} request
 * @param {object} env
 * @param {object} ctx
+* @param {object} cfg - [FIX] Added config object
 * @returns {Promise<Response>}
 */
-async function ProtocolOverWSHandler(request, env, ctx) {
+async function ProtocolOverWSHandler(request, env, ctx, cfg) { // [FIX] Added cfg
   const webSocketPair = new WebSocketPair();
   const [client, webSocket] = Object.values(webSocketPair);
   webSocket.accept();
@@ -1305,6 +1307,7 @@ async function ProtocolOverWSHandler(request, env, ctx) {
             webSocket,
             vlessResponseHeader,
             log,
+            cfg, // [FIX] Pass config to use PROXYIP
             usageCounterUpstream // Pass upstream counter stream for TCP
           );
         },
@@ -1425,6 +1428,7 @@ async function ProcessProtocolHeader(protocolBuffer, env, ctx) {
 * @param {WebSocket} webSocket
 * @param {Uint8Array} protocolResponseHeader
 * @param {function} log
+* @param {object} cfg - [FIX] Added config
 * @param {TransformStream} usageCounterUpstream
 */
 async function HandleTCPOutBound(
@@ -1436,6 +1440,7 @@ async function HandleTCPOutBound(
   webSocket,
   protocolResponseHeader,
   log,
+  cfg, // [FIX] Accept config
   usageCounterUpstream // Added for traffic counting
 ) {
   async function connectAndWrite(address, port) {
@@ -1447,9 +1452,23 @@ async function HandleTCPOutBound(
     writer.releaseLock();
     return tcpSocket;
   }
+  
+  // [FIX] Logic to use PROXYIP, as described in the screenshots.
+  // Determine the actual target for the initial connection.
+  const connectHost = cfg.proxyIP || addressRemote;
+  // Use proxyPort if proxyIP is set (defaulting to 443), otherwise use the remote's port.
+  const connectPort = cfg.proxyIP ? (cfg.proxyPort || 443) : portRemote; 
+  
+  if (cfg.proxyIP) {
+    log(`Using PROXYIP ${connectHost}:${connectPort} for target ${addressRemote}:${portRemote}`);
+  } else {
+    log(`Directly connecting to ${addressRemote}:${portRemote}`);
+  }
+  // [END FIX]
 
   async function retry() {
-    const tcpSocket = await connectAndWrite(addressRemote, portRemote);
+    // [FIX] The retry should also use the PROXYIP if set.
+    const tcpSocket = await connectAndWrite(connectHost, connectPort); 
     tcpSocket.closed
       .catch(error => {
         console.log('retry tcpSocket closed error', error);
@@ -1461,10 +1480,12 @@ async function HandleTCPOutBound(
   }
 
   try {
-      const tcpSocket = await connectAndWrite(addressRemote, portRemote);
+      // [FIX] Use the determined host and port.
+      const tcpSocket = await connectAndWrite(connectHost, connectPort);
       RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, retry, log, usageCounterUpstream);
   } catch (e) {
-      log(`Failed to connect to ${addressRemote}:${portRemote}: ${e.message}`);
+      // [FIX] Log the host we actually tried to connect to.
+      log(`Failed to connect to ${connectHost}:${connectPort}: ${e.message}`);
       safeCloseWebSocket(webSocket);
   }
 }
