@@ -1,7 +1,7 @@
 /**
 * Cloudflare Worker VLESS Proxy - Ultimate Edition (v2 - Optimized & Refined)
 *
-* [Corrected Version by Gemini]
+* [Final Corrected Version by Gemini]
 *
 * This script merges the best features of two different versions:
 * 1.  Stable Connection Core (from Script 1) - Includes working VLESS over WS and UDP-over-TCP (DNS).
@@ -466,16 +466,30 @@ const adminPanelHTML = `<!DOCTYPE html>
                 unitEl.value = unit;
             };
             
+            // [FIX] Added client-side validation
             document.getElementById('createUserForm').addEventListener('submit', async e => {
                 e.preventDefault();
-                const { utcDate, utcTime } = localToUTC(document.getElementById('expiryDate').value, document.getElementById('expiryTime').value);
+                
+                const expiryDate = document.getElementById('expiryDate').value;
+                const expiryTime = document.getElementById('expiryTime').value;
+                const uuid = document.getElementById('uuid').value;
+
+                // --- NEW VALIDATION BLOCK ---
+                if (!uuid || !expiryDate || !expiryTime) {
+                    showToast('UUID, Expiry Date, and Expiry Time are all required.', true);
+                    return;
+                }
+                // --- END NEW VALIDATION ---
+                
+                const { utcDate, utcTime } = localToUTC(expiryDate, expiryTime);
                 const userData = {
-                    uuid: document.getElementById('uuid').value,
+                    uuid: uuid,
                     exp_date: utcDate,
                     exp_time: utcTime,
                     data_limit: getLimitInBytes('dataLimitValue', 'dataLimitUnit'),
                     notes: document.getElementById('notes').value
                 };
+                
                 try {
                     await api.post('/users', userData);
                     showToast('User created successfully!');
@@ -483,7 +497,9 @@ const adminPanelHTML = `<!DOCTYPE html>
                     document.getElementById('uuid').value = crypto.randomUUID();
                     setDefaultExpiry();
                     refreshData();
-                } catch (error) { showToast(error.message, true); }
+                } catch (error) { 
+                    showToast(error.message, true); 
+                }
             });
             
             const editModal = document.getElementById('editModal');
@@ -664,12 +680,13 @@ async function handleAdminRequest(request, env, cfg, ctx) {
   const { pathname } = url;
   const jsonHeader = { 'Content-Type': 'application/json' };
 
+  // [FIX] Return JSON for setup errors so client can parse them
   if (!env.ADMIN_KEY) {
-    return new Response('Admin panel is not configured. Please set ADMIN_KEY secret.', { status: 503 });
+    return new Response(JSON.stringify({ error: 'Admin panel is not configured. Please set ADMIN_KEY secret.' }), { status: 503, headers: jsonHeader });
   }
   
   if (!env.DB || !env.USER_KV) {
-      return new Response('Admin panel is not fully configured. Please ensure D1 (DB) and KV (USER_KV) bindings are set.', { status: 503 });
+      return new Response(JSON.stringify({ error: 'Admin panel is not fully configured. Please ensure D1 (DB) and KV (USER_KV) bindings are set.' }), { status: 503, headers: jsonHeader });
   }
 
   // [FIX] Sanitize admin path to prevent double slash (//) errors
@@ -727,6 +744,7 @@ async function handleAdminRequest(request, env, cfg, ctx) {
         const notes_to_bind = body.notes || null;
         const data_limit_to_bind = (typeof body.data_limit === 'number' && body.data_limit >= 0) ? body.data_limit : 0;
 
+        // Server-side validation
         if (!uuid || !exp_date || !exp_time || !isValidUUID(uuid)) {
           throw new Error('Invalid or missing fields. (uuid, exp_date, exp_time are required).');
         }
@@ -878,6 +896,7 @@ async function handleManagementAPI(request, env, cfg, ctx) {
     return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: jsonHeader });
   }
   
+  // [FIX] Return JSON for setup errors
   if (!env.DB || !env.USER_KV) {
       return new Response(JSON.stringify({ error: 'Service is partially configured. Missing D1 or KV bindings.' }), { status: 503, headers: jsonHeader });
   }
@@ -1113,7 +1132,8 @@ export default {
     const upgradeHeader = request.headers.get('Upgrade');
     if (upgradeHeader?.toLowerCase() === 'websocket') {
       if (!env.DB || !env.USER_KV) {
-          return new Response('VLESS proxy is not fully configured. Missing D1 or KV bindings.', { status: 503 });
+          // [FIX] Return JSON error for WS connections too
+          return new Response(JSON.stringify({ error: 'VLESS proxy is not fully configured. Missing D1 or KV bindings.' }), { status: 503, headers: { 'Content-Type': 'application/json' } });
       }
       // [FIX] Pass cfg to the handler
       return ProtocolOverWSHandler(request, env, ctx, cfg);
