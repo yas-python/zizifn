@@ -104,7 +104,13 @@ function isValidUUID(uuid) {
 */
 function isExpired(expDate, expTime) {
   if (!expDate || !expTime) return true; // Default to expired if data is missing
-  const expDatetimeUTC = new Date(`${expDate}T${expTime}Z`);
+  
+  // Ensure time part has seconds for Date object creation
+  const expTimeSeconds = expTime.includes(':') && expTime.split(':').length === 2 ? `${expTime}:00` : expTime;
+  // Clean up potential milliseconds
+  const cleanTime = expTimeSeconds.split('.')[0];
+  
+  const expDatetimeUTC = new Date(`${expDate}T${cleanTime}Z`);
   return expDatetimeUTC <= new Date();
 }
 
@@ -566,7 +572,6 @@ async function checkAdminAuth(request, env, cfg) {
   return { isAdmin: true, errorResponse: null, csrfToken };
 }
 
-// --- START: MODIFIED FUNCTION ---
 /**
 * Handles a robust catch for API endpoints.
 * @param {any} e The caught error.
@@ -616,13 +621,12 @@ function handleApiError(e, context = '') {
     headers: { 'Content-Type': 'application/json' }
   });
 }
-// --- END: MODIFIED FUNCTION ---
 
 
 /**
 * Handles all incoming requests to /admin/* routes.
 * @param {Request} request
-** @param {object} env
+* @param {object} env
 * @param {object} cfg
 * @param {object} ctx - Execution context for non-blocking ops.
 * @returns {Promise<Response>}
@@ -843,12 +847,12 @@ async function handleManagementAPI(request, env, cfg, ctx) {
       // Use hasOwnProperty to correctly handle "" or null from an API
       const notes_to_bind = body.hasOwnProperty('notes') ? (body.notes || null) : null;
       let data_limit = 0;
-      if (typeof body.data_limit_gb === 'number' && body.data_limit_gb > 0) {
+      if (typeof body.data_limit_gb === 'number') {
         data_limit = body.data_limit_gb * 1024 * 1024 * 1024;
-      } else if (typeof body.data_limit_mb === 'number' && body.data_limit_mb > 0) {
+      } else if (typeof body.data_limit_mb === 'number') {
         data_limit = body.data_limit_mb * 1024 * 1024;
       }
-      
+     
       await env.DB.prepare("INSERT INTO users (uuid, expiration_date, expiration_time, notes, data_limit) VALUES (?, ?, ?, ?, ?)")
         .bind(uuid, exp_date, exp_time, notes_to_bind, data_limit).run();
         
@@ -1183,7 +1187,6 @@ async function ProtocolOverWSHandler(request, env, ctx) {
   const earlyDataHeader = request.headers.get('Sec-WebSocket-Protocol') || '';
   const readableWebSocketStream = MakeReadableWebSocketStream(webSocket, earlyDataHeader, log);
   let remoteSocketWapper = { value: null };
-  // let isDns = false; // <-- [FIX] Removed from Script 2
 
   readableWebSocketStream
     .pipeThrough(usageCounterDownstream) // Count downstream traffic
@@ -1196,10 +1199,6 @@ async function ProtocolOverWSHandler(request, env, ctx) {
           }
           // --- [FIX] End ---
           
-          // if (isDns) { // <-- [FIX] Removed from Script 2
-          //   return; 
-          // }
-
           if (remoteSocketWapper.value) {
             const writer = remoteSocketWapper.value.writable.getWriter();
             await writer.write(chunk);
@@ -1233,6 +1232,7 @@ async function ProtocolOverWSHandler(request, env, ctx) {
             controller.error(new Error('User expired.'));
             return;
           }
+          // Check current usage *plus* this session's usage
           if (user.data_limit > 0 && (user.data_usage + sessionUsage) >= user.data_limit) {
             controller.error(new Error('Data limit reached.'));
             return;
@@ -1247,11 +1247,10 @@ async function ProtocolOverWSHandler(request, env, ctx) {
           if (isUDP) {
             if (portRemote === 53) {
               // --- [FIX] Merged Logic ---
-              // isDns = true; // <-- [FIX] Removed
               const updateUpstreamUsage = (bytes) => { sessionUsage += bytes; };
               const dnsPipeline = await createDnsPipeline(webSocket, vlessResponseHeader, log, updateUpstreamUsage); // <-- [FIX] Modified createDnsPipeline
               udpStreamWriter = dnsPipeline.write;
-              udpStreamWriter(rawClientData);
+              await udpStreamWriter(rawClientData);
               // --- [FIX] End Merged Logic ---
             } else {
               controller.error(new Error('UDP proxy only for DNS (port 53)'));
@@ -1541,8 +1540,7 @@ function safeCloseWebSocket(socket) {
 */
 // --- [FIX] This function is now modified to return a writer, matching Script 1's logic ---
 async function createDnsPipeline(webSocket, vlessResponseHeader, log, updateUpstreamUsage) {
-  // [FIX] Removed the ReadableStream wrapper that listened on the websocket
-  
+  let isHeaderSent = false;
   const transformStream = new TransformStream({
     transform(chunk, controller) {
       // Parse UDP packets from VLESS framing
@@ -1556,10 +1554,8 @@ async function createDnsPipeline(webSocket, vlessResponseHeader, log, updateUpst
     },
   });
 
-  let isHeaderSent = false;
-  try {
-    // [FIX] Changed from 'readable.pipeThrough(transformStream)' to just 'transformStream.readable'
-    await transformStream.readable.pipeTo(
+  transformStream.readable
+    .pipeTo(
       new WritableStream({
         async write(chunk) {
           try {
@@ -1595,10 +1591,10 @@ async function createDnsPipeline(webSocket, vlessResponseHeader, log, updateUpst
              log('DNS WritableStream aborted: ' + e);
         }
       }),
-    );
-  } catch (e) {
-    log('DNS stream error: ' + e);
-  }
+    )
+    .catch(e => {
+      log('DNS stream error: ' + e);
+    });
 
   // --- [FIX] Added from Script 1 logic ---
   const writer = transformStream.writable.getWriter();
@@ -1737,15 +1733,15 @@ async function handleConfigPage(userID, hostName, proxyAddress, userData, userIP
 }
 
 /**
- * Generates the HTML for the beautiful config page.
- * @param {string} userID 
- * @param {string} hostName 
- * @param {string} expDate 
- * @param {string} expTime 
- * @param {number} dataUsage 
- * @param {number} dataLimit 
- * @returns {string}
- */
+* Generates the HTML for the beautiful config page.
+* @param {string} userID 
+* @param {string} hostName 
+* @param {string} expDate 
+* @param {string} expTime 
+* @param {number} dataUsage 
+* @param {number} dataLimit 
+* @returns {string}
+*/
 function generateBeautifulConfigPage(userID, hostName, expDate, expTime, dataUsage, dataLimit) {
     const subXrayUrl = `https://${hostName}/xray/${userID}`;
     const subSbUrl = `https://${hostName}/sb/${userID}`;
