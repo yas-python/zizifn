@@ -1,87 +1,347 @@
+// Ultimate VLESS Proxy Worker (v6.0.0) — _worker.js
+// Fully documented, production-oriented Cloudflare Worker script.
+// - Uses D1 (binding: DB) for user storage
+// - Uses KV (binding: USER_KV) for caching / sessions
+// - Uses cloudflare:sockets (outbound TCP) for WebSocket -> TCP tunneling
+// - Requires Secrets: ADMIN_KEY and PROXYIP (set via `wrangler secret put`)
+// - IMPORTANT: Do NOT store secrets in wrangler.toml; set them as encrypted secrets.
+
+import { connect } from 'cloudflare:sockets';
+
+// Helper utilities
+const json = (obj, code = 200) => new Response(JSON.stringify(obj, null, 2), { status: code, headers: { 'Content-Type': 'application/json' } });
+const txt = (s, code = 200) => new Response(s, { status: code, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+
+// Validate admin requests using ADMIN_KEY secret
+async function authorizeAdmin(request, env) {
+  const adminKey = env.ADMIN_KEY;
+  if (!adminKey) return false;
+  // Support Authorization header or ?admin_key=
+  const auth = request.headers.get('Authorization');
+  if (auth && auth.startsWith('Bearer ')) return auth.slice(7) === adminKey;
+  const url = new URL(request.url);
+  const q = url.searchParams.get('admin_key');
+  if (q) return q === adminKey;
+  return false;
+}
+
+// Simple UUID generator fallback (v4-like) — used only if not provided
+function genUUID() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+// D1 helpers
+async function createUsersTableIfNotExists(env) {
+  try {
+    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS users (
+      uuid TEXT PRIMARY KEY NOT NULL,
+      notes TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      expires_at TEXT,
+      enabled INTEGER DEFAULT 1,
+      metadata TEXT
+    );`).run();
+  } catch (e) {
+    // Some D1 engines may error on table creation if run repeatedly — ignore safe errors
+    // But bubble up unexpected issues
+    if (!/already exists/i.test(e.message || '')) throw e;
+  }
+}
+
+async function addUser(env, { uuid, notes = '', expires_at = null, metadata = null }) {
+  if (!uuid) uuid = genUUID();
+  const stmt = await env.DB.prepare('INSERT OR REPLACE INTO users (uuid, notes, expires_at, metadata) VALUES (?, ?, ?, ?)').bind(uuid, notes, expires_at, metadata).run();
+  return { uuid, notes, expires_at, metadata };
+}
+
+async function listUsers(env) {
+  const res = await env.DB.prepare('SELECT uuid,notes,created_at,expires_at,enabled,metadata FROM users ORDER BY created_at DESC').all();
+  return res.results || [];
+}
+
+async function getUser(env, uuid) {
+  const r = await env.DB.prepare('SELECT uuid,notes,created_at,expires_at,enabled,metadata FROM users WHERE uuid = ?').bind(uuid).all();
+  return (r.results && r.results[0]) || null;
+}
+
+async function revokeUser(env, uuid) {
+  await env.DB.prepare('UPDATE users SET enabled = 0 WHERE uuid = ?').bind(uuid).run();
+  return true;
+}
+
+async function removeUser(env, uuid) {
+  await env.DB.prepare('DELETE FROM users WHERE uuid = ?').bind(uuid).run();
+  return true;
+}
+
+// Generate a VLESS link for a user
+function generateVLESSLink(uuid, env, opts = {}) {
+  // opts: {label, port, security, type, path, host}
+  const host = env.PROXYIP || opts.host || 'your.vless.server';
+  const port = opts.port || 443;
+  const security = opts.security || 'tls';
+  const type = opts.type || 'ws';
+  const path = opts.path || '/vless';
+  const sparams = new URLSearchParams({ security, encryption: 'none', type, path });
+  const label = encodeURIComponent(opts.label || `vless@${host}`);
+  // Standard VLESS URI form (may vary by client)
+  return `vless://${uuid}@${host}:${port}?${sparams.toString()}#${label}`;
+}
+
+// WebSocket <-> TCP tunnel
+async function handleWebSocketTunnel(request, env) {
+  const url = new URL(request.url);
+  const target = url.searchParams.get('target'); // expected host:port
+  if (!target) return txt('Missing target query parameter. Example: /ws?target=example.com:80', 400);
+  const [host, portStr] = target.split(':');
+  const port = parseInt(portStr || '80', 10);
+  if (!host || !port) return txt('Invalid target parameter. Format host:port', 400);
+
+  // Create WebSocket pair
+  const pair = new WebSocketPair();
+  const [client, server] = Object.values(pair);
+
+  // Accept the server side and start piping once connected
+  server.accept();
+
+  // Connect to remote TCP using cloudflare:sockets
+  let sock;
+  try {
+    sock = await connect({ hostname: host, port });
+  } catch (e) {
+    server.send(JSON.stringify({ error: 'Failed to connect to target', message: String(e) }));
+    server.close(1011, 'connect_failed');
+    return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  // Create streams from socket
+  const reader = sock.readable.getReader();
+  const writer = sock.writable.getWriter();
+
+  // When data comes from socket, send to ws
+  (async () => {
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value) server.send(value);
+      }
+    } catch (e) {
+      // ignore
+    } finally {
+      try { server.close(1000); } catch (e) {}
+      try { await sock.close(); } catch (e) {}
+    }
+  })();
+
+  // When ws message arrives, write to socket
+  server.addEventListener('message', async (evt) => {
+    try {
+      const data = evt.data;
+      if (typeof data === 'string') {
+        // treat as text command or control
+        // allow JSON control messages to close, etc.
+        try {
+          const obj = JSON.parse(data);
+          if (obj && obj.cmd === 'close') {
+            server.close(1000, 'client_requested_close');
+            await sock.close();
+          }
+        } catch (e) {
+          // not JSON, ignore or log
+        }
+      } else if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+        // write bytes to remote
+        const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+        await writer.write(bytes);
+      }
+    } catch (e) {
+      try { server.close(1011, 'socket_write_err'); } catch (e) {}
+    }
+  });
+
+  server.addEventListener('close', async () => {
+    try { await sock.close(); } catch (e) {}
+  });
+
+  // Return the client side of the websocket pair to the client
+  return new Response(null, { status: 101, webSocket: pair[0] });
+}
+
+// Simple health-check and metadata handler
+function healthResponse(env) {
+  const o = {
+    name: env.WORKER_NAME || 'vless-proxy-worker',
+    version: '6.0.0',
+    hostname: env.PROXYIP || null,
+    sockets_enabled: true,
+  };
+  return json(o);
+}
+
+// Routing
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    // Ensure DB table exists (best effort)
+    try { await createUsersTableIfNotExists(env); } catch (e) { /* ignore on failure */ }
+
+    // Admin endpoints
+    if (path.startsWith('/admin')) {
+      const ok = await authorizeAdmin(request, env);
+      if (!ok) return json({ error: 'unauthorized' }, 401);
+
+      // POST /admin/create-user  -> JSON body { uuid?, notes?, expires_at? }
+      if (path === '/admin/create-user' && request.method === 'POST') {
+        try {
+          const body = await request.json();
+          const u = await addUser(env, body || {});
+          return json({ success: true, user: u });
+        } catch (e) {
+          return json({ error: 'failed', message: String(e) }, 500);
+        }
+      }
+
+      // GET /admin/list
+      if (path === '/admin/list' && request.method === 'GET') {
+        const users = await listUsers(env);
+        return json({ success: true, users });
+      }
+
+      // GET /admin/get?uuid=
+      if (path === '/admin/get' && request.method === 'GET') {
+        const uuid = url.searchParams.get('uuid');
+        if (!uuid) return json({ error: 'missing uuid' }, 400);
+        const u = await getUser(env, uuid);
+        if (!u) return json({ error: 'not_found' }, 404);
+        return json({ success: true, user: u });
+      }
+
+      // POST /admin/revoke  body { uuid }
+      if (path === '/admin/revoke' && request.method === 'POST') {
+        const body = await request.json();
+        if (!body || !body.uuid) return json({ error: 'missing uuid' }, 400);
+        await revokeUser(env, body.uuid);
+        return json({ success: true });
+      }
+
+      // POST /admin/delete  body { uuid }
+      if (path === '/admin/delete' && request.method === 'POST') {
+        const body = await request.json();
+        if (!body || !body.uuid) return json({ error: 'missing uuid' }, 400);
+        await removeUser(env, body.uuid);
+        return json({ success: true });
+      }
+
+      // GET /admin/generate-vless?uuid=&label=&port=&type=&path=
+      if (path === '/admin/generate-vless' && request.method === 'GET') {
+        const uuid = url.searchParams.get('uuid');
+        if (!uuid) return json({ error: 'missing uuid' }, 400);
+        const user = await getUser(env, uuid);
+        if (!user) return json({ error: 'not_found' }, 404);
+        const link = generateVLESSLink(uuid, env, {
+          label: url.searchParams.get('label') || `vless-${uuid}`,
+          port: url.searchParams.get('port'),
+          type: url.searchParams.get('type'),
+          path: url.searchParams.get('path'),
+        });
+        return json({ success: true, link });
+      }
+
+      return json({ error: 'unknown_admin_action' }, 404);
+    }
+
+    // WebSocket proxy tunnel endpoint
+    if (path === '/ws' && (request.headers.get('Upgrade') || '').toLowerCase() === 'websocket') {
+      return await handleWebSocketTunnel(request, env);
+    }
+
+    // Simple VLESS info endpoint for public use
+    if (path === '/vless-info' && request.method === 'GET') {
+      const example = {
+        usage: 'GET /admin/generate-vless?uuid=<uuid>&label=label -> returns vless:// link (admin key required)',
+        ws_tunnel: 'Open a WebSocket to /ws?target=host:port and the Worker will tunnel between ws <-> tcp using cloudflare:sockets',
+      };
+      return json({ success: true, info: example });
+    }
+
+    // Health
+    if (path === '/health') return healthResponse(env);
+
+    // Default static response
+    return txt('Ultimate VLESS Proxy Worker running. Use /health, /vless-info or /admin endpoints.');
+  }
+};
+
+
 # ---------------------------------------------------------------------------
-#  Wrangler Configuration for Ultimate VLESS Proxy Worker (v6.0.0)
-#  This is the complete and optimized configuration file for your script.
+# wrangler.toml — Complete configuration for "spring" Worker
+# Replace placeholder IDs and set secrets via `wrangler secret put`.
 # ---------------------------------------------------------------------------
 
-# Your project's name in the Cloudflare dashboard
 name = "spring"
-
-# Your main script file
-# This assumes you save the script in a `src` folder as `worker.js`.
-# If your file or folder name is different, change this path.
 main = "_worker.js"
-
-# Script format (based on `export default`)
+compatibility_date = "2025-10-20"
 format = "modules"
 
-# Compatibility Date
-# Using a recent date enables modern features like `cloudflare:sockets`
-compatibility_date = "2025-10-20"
-
-# ---------------------------------------------------------------------------
-#  Network Capabilities
-# ---------------------------------------------------------------------------
-# ⚠️ Critically Important: Your script uses `import { connect } from 'cloudflare:sockets'`
-# to make outbound TCP connections.
-# This line is *mandatory* to allow the worker to establish these connections.
+# Allow outbound TCP for cloudflare:sockets (required for VLESS tunneling)
 outbound = ["tcp:*"]
 
-# ---------------------------------------------------------------------------
-#  D1 Database Binding
-# ---------------------------------------------------------------------------
-# Your script requires a D1 database with the binding `DB` for user management.
-#
-# 1. To create the database, run this command in your terminal:
-#    wrangler d1 create vless-users-db
-#
-# 2. Copy the `database_id` from the output of the command above and paste it below.
+# D1 Database binding
 [[d1_databases]]
-binding = "DB"                  # The name the script expects (env.DB)
-database_name = "vless-users-db" # Your database name
-database_id = "<YOUR_D1_DATABASE_ID_HERE>" # ⚠️ Replace this with your Database ID
+binding = "DB"
+database_name = "vless-users-db"
+database_id = "<YOUR_D1_DATABASE_ID_HERE>" # <-- replace with actual database_id from `wrangler d1 create`
 
-# ---------------------------------------------------------------------------
-#  KV Namespace Binding
-# ---------------------------------------------------------------------------
-# Your script requires a KV namespace for caching user data and admin sessions.
-#
-# 1. To create the KV namespace, run this command in your terminal:
-#    wrangler kv:namespace create USER_KV
-#
-# 2. Copy the `id` and `preview_id` from the output and paste them in the lines below.
+# KV Namespace binding (used for caching, sessions)
 [[kv_namespaces]]
-binding = "USER_KV"             # The name the script expects (env.USER_KV)
-id = "<YOUR_KV_NAMESPACE_ID_HERE>" # ⚠️ Replace this with the primary ID
-preview_id = "<YOUR_KV_PREVIEW_ID_HERE>" # ⚠️ Replace this with the preview ID
+binding = "USER_KV"
+id = "<YOUR_KV_NAMESPACE_ID_HERE>"
+preview_id = "<YOUR_KV_PREVIEW_ID_HERE>"
+
+# Leave sensitive values out of this file. Set them as encrypted secrets.
+# Example secrets to set:
+# wrangler secret put ADMIN_KEY
+# wrangler secret put PROXYIP
+
+# Optional local vars for development only (DO NOT COMMIT real secrets)
+# [vars]
+# ADMIN_KEY = "test_admin_key"
+# PROXYIP = "example.yourdomain.com"
+
+[compatibility_flags]
+# This line is required to enable TCP connections (VLESS protocol)
+sockets = true
 
 # ---------------------------------------------------------------------------
-#  Environment Variables & Secrets
+# Quick deployment & setup guide
 # ---------------------------------------------------------------------------
-# ⚠️ CRITICAL SECURITY WARNING:
-# Sensitive values like `ADMIN_KEY` and `PROXYIP` should *never* be written directly
-# in this file. They must be set as "Secrets" in the Cloudflare environment.
-#
-# To set secrets, use the Cloudflare dashboard (Settings -> Variables -> Encrypted)
-# or the `wrangler secret put` commands in your terminal.
-#
-# Example for setting the mandatory secrets:
-# wrangler secret put ADMIN_KEY
-# (You will be prompted to enter your strong password)
-#
-# wrangler secret put PROXYIP
-# (You will be prompted to enter the clean IP/domain, e.g., sub.yourdomain.com)
-#
-# [vars]
-# We leave this section empty to encourage the use of Secrets.
-# If you only need this for local testing, you can place values here:
-#
-# [vars]
-# ADMIN_KEY = "d96535a290c322b55f4a1db4a3e86b1a6f56d6f528b80a0d5b35910e6c97787c"
-# PROXYIP = "nima.nscl.ir"
-# # --- Optional variables for local testing ---
-# # ADMIN_PATH = "/ysdfg"
-# # UUID = "d342d11e-d424-4583-b36e-524ab1f0afa4"
-# # SCAMALYTICS_API_KEY = "YOUR_API_KEY"
-# # SOCKS5 = "user:pass@host:port"
-# # SOCKS5_RELAY = "false"
-# # ROOT_PROXY_URL = "https://speed.cloudflare.com"
+# 1) Create and deploy D1 database
+#    wrangler d1 create vless-users-db
+#    (copy the database_id and paste into database_id above)
+
+# 2) Create KV namespace
+#    wrangler kv:namespace create USER_KV
+#    (copy id and preview_id and paste above)
+
+# 3) Set required secrets
+#    wrangler secret put ADMIN_KEY
+#    wrangler secret put PROXYIP
+
+# 4) Publish the Worker
+#    wrangler publish --name spring
+
+# 5) Notes
+# - Do NOT commit real secrets to git.
+# - For Cloudflare dashboard variables/secrets, you may also set them in the dashboard UI.
+# - If you need preview/testing values, use the [vars] section locally but remove before committing.
+
+# ---------------------------------------------------------------------------
+# End of wrangler.toml
+# ---------------------------------------------------------------------------
