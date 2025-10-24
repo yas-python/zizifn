@@ -1,4 +1,4 @@
-aimport { connect } from 'cloudflare:sockets';
+import { connect } from 'cloudflare:sockets';
 
 // Helper functions (updated for robustness)
 /**
@@ -49,7 +49,7 @@ async function getUserData(env, uuid) {
     }
   }
 
-  const query = await env.DB.prepare("SELECT expiration_date, expiration_time, traffic_limit, traffic_used, notes, created_at FROM users WHERE uuid = ?")
+  const query = await env.DB.prepare("SELECT expiration_date, expiration_time, traffic_limit, traffic_used FROM users WHERE uuid = ?")
     .bind(uuid)
     .first();
 
@@ -61,9 +61,7 @@ async function getUserData(env, uuid) {
     exp_date: query.expiration_date, 
     exp_time: query.expiration_time,
     traffic_limit: query.traffic_limit,
-    traffic_used: query.traffic_used || 0,
-    notes: query.notes,
-    created_at: query.created_at
+    traffic_used: query.traffic_used || 0 
   };
   await env.USER_KV.put(`user:${uuid}`, JSON.stringify(userData), { expirationTtl: 3600 });
   return userData;
@@ -134,36 +132,9 @@ const adminPanelHTML = `<!DOCTYPE html>
         h1, h2 { font-weight: 600; }
         h1 { font-size: 24px; margin-bottom: 20px; }
         h2 { font-size: 18px; border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-bottom: 20px; }
-        .card { background-color: var(--bg-card); border-radius: 8px; padding: 24px; border: 1px solid var(--border); box-shadow: 0 4px 6px rgba(0,0,0,0.1); position: relative; overflow: hidden; }
-        .card::before {
-          content: '';
-          position: absolute;
-          top: -50%;
-          left: -50%;
-          width: 200%;
-          height: 200%;
-          background: conic-gradient(
-            #ff0000, #ff00ff, #0000ff, #00ffff, #00ff00, #ffff00, #ff0000
-          );
-          animation: rgb-animation 4s linear infinite;
-          z-index: -1;
-        }
-        .card-content { background: var(--bg-card); position: relative; z-index: 1; border-radius: 8px; }
-        .dashboard-stats { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
-        .stat-card { background: #1F2937; padding: 16px; border-radius: 8px; flex: 1 1 200px; text-align: center; border: 1px solid var(--border); position: relative; overflow: hidden; }
-        .stat-card::before {
-          content: '';
-          position: absolute;
-          top: -50%;
-          left: -50%;
-          width: 200%;
-          height: 200%;
-          background: conic-gradient(
-            #ff0000, #ff00ff, #0000ff, #00ffff, #00ff00, #ffff00, #ff0000
-          );
-          animation: rgb-animation 4s linear infinite;
-          z-index: -1;
-        }
+        .card { background-color: var(--bg-card); border-radius: 8px; padding: 24px; border: 1px solid var(--border); box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .dashboard-stats { display: flex; gap: 16px; margin-bottom: 24px; }
+        .stat-card { background: #1F2937; padding: 16px; border-radius: 8px; flex: 1; text-align: center; border: 1px solid var(--border); }
         .stat-value { font-size: 24px; font-weight: 600; }
         .stat-label { font-size: 12px; color: var(--text-secondary); text-transform: uppercase; }
         .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; align-items: flex-end; }
@@ -257,39 +228,35 @@ const adminPanelHTML = `<!DOCTYPE html>
             </div>
         </div>
         <div class="card">
-            <div class="card-content">
-              <h2>Create User</h2>
-              <form id="createUserForm" class="form-grid">
-                  <div class="form-group" style="grid-column: 1 / -1;"><label for="uuid">UUID</label><div class="input-group"><input type="text" id="uuid" required><button type="button" id="generateUUID" class="btn btn-secondary">Generate</button></div></div>
-                  <div class="form-group"><label for="expiryDate">Expiry Date</label><input type="date" id="expiryDate" required></div>
-                  <div class="form-group">
-                      <label for="expiryTime">Expiry Time (Your Local Time)</label>
-                      <input type="time" id="expiryTime" step="1" required>
-                      <div class="label-note">Automatically converted to UTC on save.</div>
-                      <div class="time-quick-set-group" data-target-date="expiryDate" data-target-time="expiryTime">
-                          <button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="hour">+1 Hour</button>
-                          <button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="day">+1 Day</button>
-                          <button type="button" class="btn btn-outline-secondary" data-amount="7" data-unit="day">+1 Week</button>
-                          <button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="month">+1 Month</button>
-                      </div>
-                  </div>
-                  <div class="form-group"><label for="notes">Notes</label><input type="text" id="notes" placeholder="(Optional)"></div>
-                  <div class="form-group"><label for="dataLimit">Data Limit</label><div class="input-group"><input type="number" id="dataLimit" min="0" step="0.01"><select id="dataUnit"><option>KB</option><option>MB</option><option>GB</option><option>TB</option><option value="unlimited" selected>Unlimited</option></select></div></div>
-                  <div class="form-group"><label>&nbsp;</label><button type="submit" class="btn btn-primary">Create User</button></div>
-              </form>
-            </div>
+            <h2>Create User</h2>
+            <form id="createUserForm" class="form-grid">
+                <div class="form-group" style="grid-column: 1 / -1;"><label for="uuid">UUID</label><div class="input-group"><input type="text" id="uuid" required><button type="button" id="generateUUID" class="btn btn-secondary">Generate</button></div></div>
+                <div class="form-group"><label for="expiryDate">Expiry Date</label><input type="date" id="expiryDate" required></div>
+                <div class="form-group">
+                    <label for="expiryTime">Expiry Time (Your Local Time)</label>
+                    <input type="time" id="expiryTime" step="1" required>
+                    <div class="label-note">Automatically converted to UTC on save.</div>
+                    <div class="time-quick-set-group" data-target-date="expiryDate" data-target-time="expiryTime">
+                        <button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="hour">+1 Hour</button>
+                        <button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="day">+1 Day</button>
+                        <button type="button" class="btn btn-outline-secondary" data-amount="7" data-unit="day">+1 Week</button>
+                        <button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="month">+1 Month</button>
+                    </div>
+                </div>
+                <div class="form-group"><label for="notes">Notes</label><input type="text" id="notes" placeholder="(Optional)"></div>
+                <div class="form-group"><label for="dataLimit">Data Limit</label><div class="input-group"><input type="number" id="dataLimit" min="0" step="0.01"><select id="dataUnit"><option>KB</option><option>MB</option><option>GB</option><option>TB</option><option value="unlimited" selected>Unlimited</option></select></div></div>
+                <div class="form-group"><label>&nbsp;</label><button type="submit" class="btn btn-primary">Create User</button></div>
+            </form>
         </div>
         <div class="card" style="margin-top: 30px;">
-            <div class="card-content">
-              <h2>User List</h2>
-              <input type="text" id="searchInput" class="search-input" placeholder="Search by UUID or Notes...">
-              <button id="deleteSelected" class="btn btn-danger" style="margin-bottom: 16px;">Delete Selected</button>
-              <div style="overflow-x: auto;">
-                   <table>
-                      <thead><tr><th><input type="checkbox" id="selectAll" class="select-all checkbox"></th><th>UUID</th><th>Created</th><th>Expiry (Admin Local)</th><th>Expiry (Tehran)</th><th>Status</th><th>Notes</th><th>Data Limit</th><th>Usage</th><th>Actions</th></tr></thead>
-                      <tbody id="userList"></tbody>
-                  </table>
-              </div>
+            <h2>User List</h2>
+            <input type="text" id="searchInput" class="search-input" placeholder="Search by UUID or Notes...">
+            <button id="deleteSelected" class="btn btn-danger" style="margin-bottom: 16px;">Delete Selected</button>
+            <div style="overflow-x: auto;">
+                 <table>
+                    <thead><tr><th><input type="checkbox" id="selectAll" class="select-all checkbox"></th><th>UUID</th><th>Created</th><th>Expiry (Admin Local)</th><th>Expiry (Tehran)</th><th>Status</th><th>Notes</th><th>Data Limit</th><th>Usage</th><th>Actions</th></tr></thead>
+                    <tbody id="userList"></tbody>
+                </table>
             </div>
         </div>
     </div>
@@ -554,7 +521,7 @@ const adminPanelHTML = `<!DOCTYPE html>
 
                 const dataLimit = document.getElementById('dataLimit').value;
                 const dataUnit = document.getElementById('dataUnit').value;
-                let trafficLimit = dataUnit === 'unlimited' ? null : parseFloat(dataLimit) * (dataUnit === 'TB' ? 1024 ** 4 : dataUnit === 'GB' ? 1024 ** 3 : dataUnit === 'MB' ? 1024 ** 2 : 1024);
+                let trafficLimit = dataUnit === 'unlimited' ? null : parseFloat(dataLimit) * (dataUnit === 'TB' ? 1024 ** 4 : dataUnit === 'GB' ? 1024 ** 3 : dataUnit === 'MB' ? 1024 ** 2 : 1024 ** 1);
 
                 const userData = {
                     uuid: uuidInput.value,
@@ -613,15 +580,11 @@ const adminPanelHTML = `<!DOCTYPE html>
                   editDataUnit.value = 'unlimited';
                   editDataLimit.value = '';
                 } else {
-                  let bytes = user.traffic_limit;
-                  let unit = 'Bytes';
-                  let value = bytes.toFixed(2);
-                  if (bytes >= 1024) {
-                    value = (bytes / 1024).toFixed(2);
-                    unit = 'KB';
-                  }
-                  if (value >= 1024) {
-                    value = (value / 1024).toFixed(2);
+                  let kb = user.traffic_limit / 1024;
+                  let unit = 'KB';
+                  let value = kb.toFixed(2);
+                  if (kb >= 1024) {
+                    value = (kb / 1024).toFixed(2);
                     unit = 'MB';
                   }
                   if (value >= 1024) {
@@ -652,7 +615,7 @@ const adminPanelHTML = `<!DOCTYPE html>
 
                 const dataLimit = document.getElementById('editDataLimit').value;
                 const dataUnit = document.getElementById('editDataUnit').value;
-                let trafficLimit = dataUnit === 'unlimited' ? null : parseFloat(dataLimit) * (dataUnit === 'TB' ? 1024 ** 4 : dataUnit === 'GB' ? 1024 ** 3 : dataUnit === 'MB' ? 1024 ** 2 : 1024);
+                let trafficLimit = dataUnit === 'unlimited' ? null : parseFloat(dataLimit) * (dataUnit === 'TB' ? 1024 ** 4 : dataUnit === 'GB' ? 1024 ** 3 : dataUnit === 'MB' ? 1024 ** 2 : 1024 ** 1);
 
                 const updatedData = {
                     exp_date: utcDate,
@@ -792,7 +755,7 @@ async function handleAdminRequest(request, env) {
                     throw new Error('Invalid or missing fields. Use UUID, YYYY-MM-DD, and HH:MM:SS.');
                 }
                  
-                await env.DB.prepare("INSERT INTO users (uuid, expiration_date, expiration_time, notes, traffic_limit, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))")
+                await env.DB.prepare("INSERT INTO users (uuid, expiration_date, expiration_time, notes, traffic_limit) VALUES (?, ?, ?, ?, ?)")
                     .bind(uuid, expDate, expTime, notes || null, traffic_limit).run();
                 await env.USER_KV.put(`user:${uuid}`, JSON.stringify({ exp_date: expDate, exp_time: expTime, traffic_limit, traffic_used: 0 }));
                  
@@ -1686,7 +1649,7 @@ function generateBeautifulConfigPage(userID, hostName, proxyAddress, expDate = '
 
   let expirationBlock = '';
   if (expDate && expTime) {
-      const utcTimestamp = `${expDate}T${expTime.split('[0]')[0]}Z`;
+      const utcTimestamp = `${expDate}T${expTime.split('.')[0]}Z`;
       expirationBlock = `
         <div class="expiration-card">
           <div class="expiration-card-content">
