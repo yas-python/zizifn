@@ -1,7 +1,6 @@
 /**
  * Ultimate VLESS Proxy Worker - Complete Production Edition
- * 
- * Features:
+ * * Features:
  * - Advanced WebSocket handling with accurate traffic counting
  * - Admin panel with user management (expiration + traffic limits)
  * - Beautiful user config page with network info
@@ -10,20 +9,19 @@
  * - D1 Database + KV Cache with optimized performance
  * - Real-time statistics dashboard
  * - Bulk operations support
- * 
- * Setup Requirements:
+ * * Setup Requirements:
  * 1. D1 Database (bind as DB)
  * 2. KV Namespace (bind as USER_KV)
  * 3. Run SQL in D1 console:
- *    CREATE TABLE IF NOT EXISTS users (
- *      uuid TEXT PRIMARY KEY,
- *      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
- *      expiration_date TEXT NOT NULL,
- *      expiration_time TEXT NOT NULL,
- *      notes TEXT,
- *      traffic_limit INTEGER DEFAULT 0,
- *      traffic_used INTEGER DEFAULT 0
- *    );
+ * CREATE TABLE IF NOT EXISTS users (
+ * uuid TEXT PRIMARY KEY,
+ * created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+ * expiration_date TEXT NOT NULL,
+ * expiration_time TEXT NOT NULL,
+ * notes TEXT,
+ * traffic_limit INTEGER DEFAULT 0,
+ * traffic_used INTEGER DEFAULT 0
+ * );
  * 4. Set Secrets in Cloudflare: ADMIN_KEY
  * 5. Set Variables (optional): UUID, PROXYIP, SOCKS5, ROOT_PROXY_URL
  */
@@ -103,7 +101,7 @@ function isExpired(expDate, expTime) {
 function formatBytes(bytes) {
   if (bytes === 0) return '0 Bytes';
   const k = 1024;
-  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
@@ -932,13 +930,13 @@ async function handleAdminRequest(request, env, ctx) {
         }
 
         await env.DB.prepare("INSERT INTO users (uuid, expiration_date, expiration_time, notes, traffic_limit, traffic_used) VALUES (?, ?, ?, ?, ?, 0)")
-          .bind(uuid, expDate, expTime, notes || null, traffic_limit || 0).run();
+          .bind(uuid, expDate, expTime, notes || null, traffic_limit).run(); // Use traffic_limit (which can be null)
         
         ctx.waitUntil(env.USER_KV.put(`user:${uuid}`, JSON.stringify({ 
           uuid,
-          exp_date: expDate, 
-          exp_time: expTime, 
-          traffic_limit: traffic_limit || 0, 
+          expiration_date: expDate, 
+          expiration_time: expTime, 
+          traffic_limit: traffic_limit, // Store null if it is null
           traffic_used: 0 
         })));
 
@@ -981,7 +979,7 @@ async function handleAdminRequest(request, env, ctx) {
         }
 
         let query = "UPDATE users SET expiration_date = ?, expiration_time = ?, notes = ?, traffic_limit = ?";
-        let binds = [expDate, expTime, notes || null, traffic_limit || 0];
+        let binds = [expDate, expTime, notes || null, traffic_limit]; // Use traffic_limit (can be null)
         
         if (reset_traffic) {
           query += ", traffic_used = 0";
