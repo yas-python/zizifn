@@ -1,18 +1,20 @@
 /**
- * Ultimate VLESS Proxy Worker - Complete Merged Edition
+ * Ultimate VLESS Proxy Worker - Complete Production Edition
  * 
  * Features:
- * - Advanced WebSocket handling with traffic counting
+ * - Advanced WebSocket handling with accurate traffic counting
  * - Admin panel with user management (expiration + traffic limits)
  * - Beautiful user config page with network info
  * - Full PROXYIP and SOCKS5 support
  * - Multi-timezone support (Local, Tehran, UTC)
- * - D1 Database + KV Cache
+ * - D1 Database + KV Cache with optimized performance
+ * - Real-time statistics dashboard
+ * - Bulk operations support
  * 
  * Setup Requirements:
  * 1. D1 Database (bind as DB)
  * 2. KV Namespace (bind as USER_KV)
- * 3. Run SQL:
+ * 3. Run SQL in D1 console:
  *    CREATE TABLE IF NOT EXISTS users (
  *      uuid TEXT PRIMARY KEY,
  *      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -22,22 +24,19 @@
  *      traffic_limit INTEGER DEFAULT 0,
  *      traffic_used INTEGER DEFAULT 0
  *    );
- * 4. Set Secrets: ADMIN_KEY
- * 5. Set Variables: UUID, PROXYIP (optional)
- * 6. Add to wrangler.toml:
- *    [compatibility_flags]
- *    sockets = true
+ * 4. Set Secrets in Cloudflare: ADMIN_KEY
+ * 5. Set Variables (optional): UUID, PROXYIP, SOCKS5, ROOT_PROXY_URL
  */
 
 import { connect } from 'cloudflare:sockets';
 
 // ============================================================================
-// CONFIGURATION
+// CONFIGURATION & CONSTANTS
 // ============================================================================
 
 const Config = {
   userID: 'd342d11e-d424-4583-b36e-524ab1f0afa4',
-  proxyIPs: ['nima.nscl.ir:443'], // Multiple proxies supported
+  proxyIPs: ['nima.nscl.ir:443'],
   scamalytics: {
     username: 'revilseptember',
     apiKey: 'b2fc368184deb3d8ac914bd776b8215fe899dd8fef69fbaba77511acfbdeca0d',
@@ -128,31 +127,35 @@ async function getUserData(env, uuid, ctx) {
   const userFromDb = await env.DB.prepare("SELECT * FROM users WHERE uuid = ?").bind(uuid).first();
   if (!userFromDb) return null;
   
+  const cachePromise = env.USER_KV.put(cacheKey, JSON.stringify(userFromDb), { expirationTtl: 3600 });
+  
   if (ctx) {
-    ctx.waitUntil(env.USER_KV.put(cacheKey, JSON.stringify(userFromDb), { expirationTtl: 3600 }));
+    ctx.waitUntil(cachePromise);
   } else {
-    await env.USER_KV.put(cacheKey, JSON.stringify(userFromDb), { expirationTtl: 3600 });
+    await cachePromise;
   }
   
   return userFromDb;
 }
 
 async function updateUsage(env, uuid, bytes, ctx) {
-  if (bytes > 0 && uuid) {
-    try {
-      const usage = Math.round(bytes);
-      await env.DB.prepare("UPDATE users SET traffic_used = traffic_used + ? WHERE uuid = ?")
-        .bind(usage, uuid)
-        .run();
-      
-      if (ctx) {
-        ctx.waitUntil(env.USER_KV.delete(`user:${uuid}`));
-      } else {
-        await env.USER_KV.delete(`user:${uuid}`);
-      }
-    } catch (err) {
-      console.error(`Failed to update usage for ${uuid}:`, err);
+  if (bytes <= 0 || !uuid) return;
+  
+  try {
+    const usage = Math.round(bytes);
+    const updatePromise = env.DB.prepare("UPDATE users SET traffic_used = traffic_used + ? WHERE uuid = ?")
+      .bind(usage, uuid)
+      .run();
+    
+    const deletePromise = env.USER_KV.delete(`user:${uuid}`);
+    
+    if (ctx) {
+      ctx.waitUntil(Promise.all([updatePromise, deletePromise]));
+    } else {
+      await Promise.all([updatePromise, deletePromise]);
     }
+  } catch (err) {
+    console.error(`Failed to update usage for ${uuid}:`, err);
   }
 }
 
@@ -269,7 +272,7 @@ async function handleIpSubscription(core, userID, hostName) {
 }
 
 // ============================================================================
-// ADMIN PANEL HTML
+// ADMIN PANEL HTML (Complete and Optimized)
 // ============================================================================
 
 const adminLoginHTML = `<!DOCTYPE html>
@@ -294,7 +297,7 @@ const adminLoginHTML = `<!DOCTYPE html>
     <div class="login-container">
         <h1>Admin Login</h1>
         <form method="POST" action="/admin">
-            <input type="password" name="password" placeholder="••••••••••••••" required>
+            <input type="password" name="password" placeholder="Enter admin password" required>
             <button type="submit">Login</button>
         </form>
     </div>
@@ -319,20 +322,19 @@ const adminPanelHTML = `<!DOCTYPE html>
         h1 { font-size: 24px; margin-bottom: 20px; }
         h2 { font-size: 18px; border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-bottom: 20px; }
         .card { background-color: var(--bg-card); border-radius: 8px; padding: 24px; border: 1px solid var(--border); box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        .dashboard-stats { display: flex; gap: 16px; margin-bottom: 24px; }
-        .stat-card { background: #1F2937; padding: 16px; border-radius: 8px; flex: 1; text-align: center; border: 1px solid var(--border); }
-        .stat-value { font-size: 24px; font-weight: 600; }
-        .stat-label { font-size: 12px; color: var(--text-secondary); text-transform: uppercase; }
+        .dashboard-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+        .stat-card { background: #1F2937; padding: 16px; border-radius: 8px; text-align: center; border: 1px solid var(--border); }
+        .stat-value { font-size: 24px; font-weight: 600; color: var(--accent); }
+        .stat-label { font-size: 12px; color: var(--text-secondary); text-transform: uppercase; margin-top: 4px; }
         .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; align-items: flex-end; }
         .form-group { display: flex; flex-direction: column; }
         .form-group label { margin-bottom: 8px; font-weight: 500; color: var(--text-secondary); }
         .form-group .input-group { display: flex; }
-        input[type="text"], input[type="date"], input[type="time"], input[type="number"] {
+        input[type="text"], input[type="date"], input[type="time"], input[type="number"], select {
             width: 100%; box-sizing: border-box; background-color: #374151; border: 1px solid #4B5563; color: var(--text-primary);
             padding: 10px; border-radius: 6px; font-size: 14px; transition: border-color 0.2s;
         }
-        input:focus { outline: none; border-color: var(--accent); }
-        select { background-color: #374151; border: 1px solid #4B5563; color: var(--text-primary); padding: 10px; border-radius: 6px; font-size: 14px; }
+        input:focus, select:focus { outline: none; border-color: var(--accent); }
         .label-note { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
         .btn {
             padding: 10px 16px; border: none; border-radius: 6px; font-weight: 600; cursor: pointer;
@@ -352,7 +354,7 @@ const adminPanelHTML = `<!DOCTYPE html>
         table { width: 100%; border-collapse: collapse; margin-top: 20px; }
         th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         th { color: var(--text-secondary); font-weight: 600; font-size: 12px; text-transform: uppercase; }
-        td { color: var(--text-primary); font-family: "SF Mono", "Fira Code", monospace; }
+        td { color: var(--text-primary); font-family: "SF Mono", "Fira Code", monospace; font-size: 13px; }
         .status-badge { padding: 4px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; display: inline-block; }
         .status-active { background-color: var(--success); color: #064E3B; }
         .status-expired { background-color: var(--expired); color: #78350F; }
@@ -362,15 +364,13 @@ const adminPanelHTML = `<!DOCTYPE html>
         #toast.error { border-left: 5px solid var(--danger); }
         #toast.success { border-left: 5px solid var(--success); }
         .uuid-cell { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-        .btn-copy { background: transparent; border: none; color: var(--text-secondary); padding: 4px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-        .btn-copy:hover { background-color: #374151; color: var(--text-primary); }
         .actions-cell { display: flex; gap: 8px; justify-content: center; }
         .time-display { display: flex; flex-direction: column; }
         .time-local { font-weight: 600; }
         .time-utc, .time-relative { font-size: 11px; color: var(--text-secondary); }
         .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.7); z-index: 1000; display: flex; justify-content: center; align-items: center; opacity: 0; visibility: hidden; transition: opacity 0.3s, visibility 0.3s; }
         .modal-overlay.show { opacity: 1; visibility: visible; }
-        .modal-content { background-color: var(--bg-card); padding: 30px; border-radius: 12px; box-shadow: 0 5px 25px rgba(0,0,0,0.4); width: 90%; max-width: 500px; transform: scale(0.9); transition: transform 0.3s; border: 1px solid var(--border); }
+        .modal-content { background-color: var(--bg-card); padding: 30px; border-radius: 12px; box-shadow: 0 5px 25px rgba(0,0,0,0.4); width: 90%; max-width: 500px; transform: scale(0.9); transition: transform 0.3s; border: 1px solid var(--border); max-height: 90vh; overflow-y: auto; }
         .modal-overlay.show .modal-content { transform: scale(1); }
         .modal-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 15px; margin-bottom: 20px; }
         .modal-header h2 { margin: 0; border: none; font-size: 20px; }
@@ -382,12 +382,12 @@ const adminPanelHTML = `<!DOCTYPE html>
             padding: 6px 10px; font-size: 12px; font-weight: 500;
         }
         .btn-outline-secondary:hover { background-color: var(--btn-secondary-bg); color: white; border-color: var(--btn-secondary-bg); }
-        .checkbox { width: 16px; height: 16px; margin-right: 10px; }
+        .checkbox { width: 16px; height: 16px; margin-right: 10px; cursor: pointer; }
         .select-all { cursor: pointer; }
         @media (max-width: 768px) {
-            tr { border: 1px solid var(--border); border-radius: 8px; display: block; margin-bottom: 1rem; }
-            td { border: none; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
-            .dashboard-stats { flex-direction: column; }
+            .dashboard-stats { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+            table { font-size: 12px; }
+            th, td { padding: 8px; }
         }
     </style>
 </head>
@@ -428,8 +428,8 @@ const adminPanelHTML = `<!DOCTYPE html>
                         <button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="month">+1 Month</button>
                     </div>
                 </div>
-                <div class="form-group"><label for="notes">Notes</label><input type="text" id="notes" placeholder="(Optional)"></div>
-                <div class="form-group"><label for="dataLimit">Data Limit</label><div class="input-group"><input type="number" id="dataLimit" min="0" step="0.01"><select id="dataUnit"><option>KB</option><option>MB</option><option>GB</option><option>TB</option><option value="unlimited" selected>Unlimited</option></select></div></div>
+                <div class="form-group"><label for="notes">Notes</label><input type="text" id="notes" placeholder="Optional notes"></div>
+                <div class="form-group"><label for="dataLimit">Data Limit</label><div class="input-group"><input type="number" id="dataLimit" min="0" step="0.01" placeholder="0"><select id="dataUnit"><option>KB</option><option>MB</option><option>GB</option><option>TB</option><option value="unlimited" selected>Unlimited</option></select></div></div>
                 <div class="form-group"><label>&nbsp;</label><button type="submit" class="btn btn-primary">Create User</button></div>
             </form>
         </div>
@@ -448,7 +448,8 @@ const adminPanelHTML = `<!DOCTYPE html>
     <div id="toast"></div>
     <div id="editModal" class="modal-overlay">
         <div class="modal-content">
-            <div class="modal-header                <h2>Edit User</h2>
+            <div class="modal-header">
+                <h2>Edit User</h2>
                 <button id="modalCloseBtn" class="modal-close-btn">&times;</button>
             </div>
             <form id="editUserForm">
@@ -465,7 +466,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                         <button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="month">+1 Month</button>
                     </div>
                 </div>
-                <div class="form-group" style="margin-top: 16px;"><label for="editNotes">Notes</label><input type="text" id="editNotes" name="notes" placeholder="(Optional)"></div>
+                <div class="form-group" style="margin-top: 16px;"><label for="editNotes">Notes</label><input type="text" id="editNotes" name="notes" placeholder="Optional notes"></div>
                 <div class="form-group" style="margin-top: 16px;"><label for="editDataLimit">Data Limit</label><div class="input-group"><input type="number" id="editDataLimit" min="0" step="0.01"><select id="editDataUnit"><option>KB</option><option>MB</option><option>GB</option><option>TB</option><option value="unlimited">Unlimited</option></select></div></div>
                 <div class="form-group" style="margin-top: 16px;"><label><input type="checkbox" id="resetTraffic" name="reset_traffic"> Reset Traffic Usage</label></div>
                 <div class="modal-footer">
@@ -641,8 +642,8 @@ const adminPanelHTML = `<!DOCTYPE html>
                         const expiry = formatExpiryDateTime(user.expiration_date, user.expiration_time);
                         const row = document.createElement('tr');
                         row.innerHTML = \`
-                            <td><input type="checkbox" class="user-checkbox" data-uuid="\${user.uuid}"></td>
-                            <td><div class="uuid-cell" title="\${user.uuid}">\${user.uuid}</div></td>
+                            <td><input type="checkbox" class="user-checkbox checkbox" data-uuid="\${user.uuid}"></td>
+                            <td><div class="uuid-cell" title="\${user.uuid}">\${user.uuid.substring(0, 8)}...</div></td>
                             <td>\${new Date(user.created_at).toLocaleString()}</td>
                             <td>
                                 <div class="time-display">
@@ -660,7 +661,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                             <td><span class="status-badge \${expiry.isExpired ? 'status-expired' : 'status-active'}">\${expiry.isExpired ? 'Expired' : 'Active'}</span></td>
                             <td>\${user.notes || '-'}</td>
                             <td>\${user.traffic_limit ? formatBytes(user.traffic_limit) : 'Unlimited'}</td>
-                            <td>\${formatBytes(user.traffic_used)}</td>
+                            <td>\${formatBytes(user.traffic_used || 0)}</td>
                             <td>
                                 <div class="actions-cell">
                                     <button class="btn btn-secondary btn-edit" data-uuid="\${user.uuid}">Edit</button>
@@ -692,7 +693,12 @@ const adminPanelHTML = `<!DOCTYPE html>
 
                 const dataLimit = document.getElementById('dataLimit').value;
                 const dataUnit = document.getElementById('dataUnit').value;
-                let trafficLimit = dataUnit === 'unlimited' ? null : parseFloat(dataLimit) * (dataUnit === 'TB' ? 1024 ** 4 : dataUnit === 'GB' ? 1024 ** 3 : dataUnit === 'MB' ? 1024 ** 2 : 1024 ** 1);
+                let trafficLimit = null;
+                
+                if (dataUnit !== 'unlimited' && dataLimit) {
+                    const multipliers = { KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3, TB: 1024 ** 4 };
+                    trafficLimit = parseFloat(dataLimit) * (multipliers[dataUnit] || 1);
+                }
 
                 const userData = {
                     uuid: uuidInput.value,
@@ -747,26 +753,19 @@ const adminPanelHTML = `<!DOCTYPE html>
 
                 const editDataLimit = document.getElementById('editDataLimit');
                 const editDataUnit = document.getElementById('editDataUnit');
-                if (user.traffic_limit === null) {
+                if (user.traffic_limit === null || user.traffic_limit === 0) {
                   editDataUnit.value = 'unlimited';
                   editDataLimit.value = '';
                 } else {
-                  let kb = user.traffic_limit / 1024;
+                  let bytes = user.traffic_limit;
                   let unit = 'KB';
-                  let value = kb.toFixed(2);
-                  if (kb >= 1024) {
-                    value = (kb / 1024).toFixed(2);
-                    unit = 'MB';
-                  }
-                  if (value >= 1024) {
-                    value = (value / 1024).toFixed(2);
-                    unit = 'GB';
-                  }
-                  if (value >= 1024) {
-                    value = (value / 1024).toFixed(2);
-                    unit = 'TB';
-                  }
-                  editDataLimit.value = value;
+                  let value = bytes / 1024;
+                  
+                  if (value >= 1024) { value = value / 1024; unit = 'MB'; }
+                  if (value >= 1024) { value = value / 1024; unit = 'GB'; }
+                  if (value >= 1024) { value = value / 1024; unit = 'TB'; }
+                  
+                  editDataLimit.value = value.toFixed(2);
                   editDataUnit.value = unit;
                 }
                 document.getElementById('resetTraffic').checked = false;
@@ -786,7 +785,12 @@ const adminPanelHTML = `<!DOCTYPE html>
 
                 const dataLimit = document.getElementById('editDataLimit').value;
                 const dataUnit = document.getElementById('editDataUnit').value;
-                let trafficLimit = dataUnit === 'unlimited' ? null : parseFloat(dataLimit) * (dataUnit === 'TB' ? 1024 ** 4 : dataUnit === 'GB' ? 1024 ** 3 : dataUnit === 'MB' ? 1024 ** 2 : 1024 ** 1);
+                let trafficLimit = null;
+                
+                if (dataUnit !== 'unlimited' && dataLimit) {
+                    const multipliers = { KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3, TB: 1024 ** 4 };
+                    trafficLimit = parseFloat(dataLimit) * (multipliers[dataUnit] || 1);
+                }
 
                 const updatedData = {
                     exp_date: utcDate,
@@ -821,7 +825,10 @@ const adminPanelHTML = `<!DOCTYPE html>
 
             function filterUsers() {
               const searchTerm = searchInput.value.toLowerCase();
-              const filtered = allUsers.filter(user => user.uuid.toLowerCase().includes(searchTerm) || (user.notes && user.notes.toLowerCase().includes(searchTerm)));
+              const filtered = allUsers.filter(user => 
+                user.uuid.toLowerCase().includes(searchTerm) || 
+                (user.notes && user.notes.toLowerCase().includes(searchTerm))
+              );
               renderUsers(filtered);
             }
 
@@ -896,7 +903,12 @@ async function handleAdminRequest(request, env, ctx) {
         const activeUsers = totalUsers - expiredUsers;
         const totalTrafficQuery = await env.DB.prepare("SELECT SUM(traffic_used) as sum FROM users").first();
         const totalTraffic = totalTrafficQuery?.sum || 0;
-        return new Response(JSON.stringify({ total_users: totalUsers, active_users: activeUsers, expired_users: expiredUsers, total_traffic: totalTraffic }), { status: 200, headers: jsonHeader });
+        return new Response(JSON.stringify({ 
+          total_users: totalUsers, 
+          active_users: activeUsers, 
+          expired_users: expiredUsers, 
+          total_traffic: totalTraffic 
+        }), { status: 200, headers: jsonHeader });
       } catch (e) {
         return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: jsonHeader });
       }
@@ -919,10 +931,16 @@ async function handleAdminRequest(request, env, ctx) {
           throw new Error('Invalid or missing fields. Use UUID, YYYY-MM-DD, and HH:MM:SS.');
         }
 
-        await env.DB.prepare("INSERT INTO users (uuid, expiration_date, expiration_time, notes, traffic_limit) VALUES (?, ?, ?, ?, ?)")
-          .bind(uuid, expDate, expTime, notes || null, traffic_limit).run();
+        await env.DB.prepare("INSERT INTO users (uuid, expiration_date, expiration_time, notes, traffic_limit, traffic_used) VALUES (?, ?, ?, ?, ?, 0)")
+          .bind(uuid, expDate, expTime, notes || null, traffic_limit || 0).run();
         
-        ctx.waitUntil(env.USER_KV.put(`user:${uuid}`, JSON.stringify({ exp_date: expDate, exp_time: expTime, traffic_limit, traffic_used: 0 })));
+        ctx.waitUntil(env.USER_KV.put(`user:${uuid}`, JSON.stringify({ 
+          uuid,
+          exp_date: expDate, 
+          exp_time: expTime, 
+          traffic_limit: traffic_limit || 0, 
+          traffic_used: 0 
+        })));
 
         return new Response(JSON.stringify({ success: true, uuid }), { status: 201, headers: jsonHeader });
       } catch (error) {
@@ -962,14 +980,17 @@ async function handleAdminRequest(request, env, ctx) {
           throw new Error('Invalid date/time fields. Use YYYY-MM-DD and HH:MM:SS.');
         }
 
-        let setClauses = "expiration_date = ?, expiration_time = ?, notes = ?, traffic_limit = ?";
-        let binds = [expDate, expTime, notes || null, traffic_limit, uuid];
+        let query = "UPDATE users SET expiration_date = ?, expiration_time = ?, notes = ?, traffic_limit = ?";
+        let binds = [expDate, expTime, notes || null, traffic_limit || 0];
+        
         if (reset_traffic) {
-          setClauses += ", traffic_used = 0";
+          query += ", traffic_used = 0";
         }
+        
+        query += " WHERE uuid = ?";
+        binds.push(uuid);
 
-        await env.DB.prepare(`UPDATE users SET ${setClauses} WHERE uuid = ?`)
-          .bind(...binds).run();
+        await env.DB.prepare(query).bind(...binds).run();
         
         ctx.waitUntil(env.USER_KV.delete(`user:${uuid}`));
 
@@ -1001,7 +1022,10 @@ async function handleAdminRequest(request, env, ctx) {
         ctx.waitUntil(env.USER_KV.put('admin_session_token', token, { expirationTtl: 86400 }));
         return new Response(null, {
           status: 302,
-          headers: { 'Location': '/admin', 'Set-Cookie': `auth_token=${token}; HttpOnly; Secure; Path=/admin; Max-Age=86400; SameSite=Strict` },
+          headers: { 
+            'Location': '/admin', 
+            'Set-Cookie': `auth_token=${token}; HttpOnly; Secure; Path=/admin; Max-Age=86400; SameSite=Strict` 
+          },
         });
       } else {
         const loginPageWithError = adminLoginHTML.replace('</form>', '</form><p class="error">Invalid password.</p>');
@@ -1010,7 +1034,9 @@ async function handleAdminRequest(request, env, ctx) {
     }
 
     if (request.method === 'GET') {
-      return new Response(await isAdmin(request, env) ? adminPanelHTML : adminLoginHTML, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
+      return new Response(await isAdmin(request, env) ? adminPanelHTML : adminLoginHTML, { 
+        headers: { 'Content-Type': 'text/html;charset=utf-8' } 
+      });
     }
 
     return new Response('Method Not Allowed', { status: 405 });
@@ -1020,7 +1046,7 @@ async function handleAdminRequest(request, env, ctx) {
 }
 
 // ============================================================================
-// VLESS PROTOCOL HANDLERS
+// VLESS PROTOCOL HANDLERS - CRITICAL FIX FOR CONNECTION ISSUES
 // ============================================================================
 
 async function ProtocolOverWSHandler(request, config, env, ctx) {
@@ -1036,47 +1062,47 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
 
   const log = (info, event) => console.log(`[${address}:${portWithRandomLog}] ${info}`, event || '');
 
-  const updateUsageInDB = async () => {
+  // CRITICAL FIX: Create a deferred update mechanism that doesn't block the connection
+  const deferredUsageUpdate = () => {
     if (sessionUsage > 0 && userUUID) {
-      try {
-        await updateUsage(env, userUUID, sessionUsage, ctx);
-        log(`Updated usage for ${userUUID} by ${sessionUsage} bytes.`);
-      } catch (err) {
-        console.error(`Failed to update usage for ${userUUID}:`, err);
-      }
+      const usageToUpdate = sessionUsage;
+      const uuidToUpdate = userUUID;
+      
+      // Reset counters immediately
+      sessionUsage = 0;
+      
+      // Schedule the update without blocking
+      ctx.waitUntil(
+        updateUsage(env, uuidToUpdate, usageToUpdate, ctx)
+          .catch(err => console.error(`Deferred usage update failed for ${uuidToUpdate}:`, err))
+      );
     }
   };
 
-  ctx.waitUntil(new Promise(resolve => {
-    const cleanup = () => {
-      updateUsageInDB().finally(resolve);
-    };
-    webSocket.addEventListener('close', cleanup, { once: true });
-    webSocket.addEventListener('error', cleanup, { once: true });
-    setTimeout(cleanup, 30000);
-  }));
+  // Schedule periodic updates every 10 seconds during active connection
+  const updateInterval = setInterval(deferredUsageUpdate, 10000);
 
-  const createUsageCountingTransform = () => {
-    return new TransformStream({
-      transform(chunk, controller) {
-        sessionUsage += chunk.byteLength;
-        controller.enqueue(chunk);
-      }
-    });
+  // Final cleanup handler
+  const finalCleanup = () => {
+    clearInterval(updateInterval);
+    deferredUsageUpdate(); // Final update
   };
 
-  const usageCounterDownstream = createUsageCountingTransform();
-  const usageCounterUpstream = createUsageCountingTransform();
+  webSocket.addEventListener('close', finalCleanup, { once: true });
+  webSocket.addEventListener('error', finalCleanup, { once: true });
 
   const earlyDataHeader = request.headers.get('Sec-WebSocket-Protocol') || '';
   const readableWebSocketStream = MakeReadableWebSocketStream(webSocket, earlyDataHeader, log);
   let remoteSocketWrapper = { value: null };
 
+  // CRITICAL FIX: Simplified traffic counting that doesn't interfere with data flow
   readableWebSocketStream
-    .pipeThrough(usageCounterDownstream)
     .pipeTo(
       new WritableStream({
         async write(chunk, controller) {
+          // Count download traffic (from client)
+          sessionUsage += chunk.byteLength;
+
           if (udpStreamWriter) {
             return udpStreamWriter.write(chunk);
           }
@@ -1104,21 +1130,27 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
             controller.error(new Error(message));
             return;
           }
+          
           if (!user) {
-            controller.error(new Error('User not found.'));
+            controller.error(new Error('User not found'));
             return;
           }
 
           userUUID = user.uuid;
 
+          // Check expiration
           if (isExpired(user.expiration_date, user.expiration_time)) {
-            controller.error(new Error('User expired.'));
+            controller.error(new Error('User expired'));
             return;
           }
 
-          if (user.traffic_limit && user.traffic_limit > 0 && (user.traffic_used + sessionUsage) >= user.traffic_limit) {
-            controller.error(new Error('Data limit reached.'));
-            return;
+          // Check traffic limit
+          if (user.traffic_limit && user.traffic_limit > 0) {
+            const totalUsage = (user.traffic_used || 0) + sessionUsage;
+            if (totalUsage >= user.traffic_limit) {
+              controller.error(new Error('Data limit reached'));
+              return;
+            }
           }
 
           address = addressRemote;
@@ -1128,8 +1160,9 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
 
           if (isUDP) {
             if (portRemote === 53) {
-              const updateUpstreamUsage = (bytes) => { sessionUsage += bytes; };
-              const dnsPipeline = await createDnsPipeline(webSocket, vlessResponseHeader, log, updateUpstreamUsage);
+              const dnsPipeline = await createDnsPipeline(webSocket, vlessResponseHeader, log, (bytes) => {
+                sessionUsage += bytes; // Count DNS response traffic
+              });
               udpStreamWriter = dnsPipeline.write;
               await udpStreamWriter(rawClientData);
             } else {
@@ -1148,29 +1181,34 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
             vlessResponseHeader,
             log,
             config,
-            usageCounterUpstream
+            (bytes) => { sessionUsage += bytes; } // Simple callback for upload traffic counting
           );
         },
         close() {
           log('readableWebSocketStream closed');
+          finalCleanup();
         },
         abort(err) {
           log('readableWebSocketStream aborted', err);
+          finalCleanup();
         },
       }),
     )
     .catch(err => {
       console.error('Pipeline failed:', err.stack || err);
       safeCloseWebSocket(webSocket);
+      finalCleanup();
     });
 
   return new Response(null, { status: 101, webSocket: client });
 }
 
 async function ProcessProtocolHeader(protocolBuffer, env, ctx) {
-  if (protocolBuffer.byteLength < 17) return { hasError: true, message: 'invalid data' };
+  if (protocolBuffer.byteLength < 17) {
+    return { hasError: true, message: 'invalid data' };
+  }
   
-  const dataView = new DataView(protocolBuffer.buffer);
+  const dataView = new DataView(protocolBuffer.buffer || protocolBuffer);
   const version = dataView.getUint8(0);
 
   let uuid;
@@ -1186,50 +1224,79 @@ async function ProcessProtocolHeader(protocolBuffer, env, ctx) {
   }
 
   const payloadStart = 17;
-  if (protocolBuffer.byteLength < payloadStart + 1) return { hasError: true, message: 'invalid data length' };
+  if (protocolBuffer.byteLength < payloadStart + 1) {
+    return { hasError: true, message: 'invalid data length' };
+  }
 
   const optLength = dataView.getUint8(payloadStart);
   const commandIndex = payloadStart + 1 + optLength;
-  if (protocolBuffer.byteLength < commandIndex + 1) return { hasError: true, message: 'invalid data length (command)' };
+  
+  if (protocolBuffer.byteLength < commandIndex + 1) {
+    return { hasError: true, message: 'invalid data length (command)' };
+  }
   
   const command = dataView.getUint8(commandIndex);
-  if (command !== 1 && command !== 2) return { hasError: true, message: `command ${command} is not supported` };
+  if (command !== 1 && command !== 2) {
+    return { hasError: true, message: `command ${command} is not supported` };
+  }
 
   const portIndex = commandIndex + 1;
-  if (protocolBuffer.byteLength < portIndex + 2) return { hasError: true, message: 'invalid data length (port)' };
+  if (protocolBuffer.byteLength < portIndex + 2) {
+    return { hasError: true, message: 'invalid data length (port)' };
+  }
+  
   const portRemote = dataView.getUint16(portIndex, false);
 
   const addressTypeIndex = portIndex + 2;
-  if (protocolBuffer.byteLength < addressTypeIndex + 1) return { hasError: true, message: 'invalid data length (address type)' };
+  if (protocolBuffer.byteLength < addressTypeIndex + 1) {
+    return { hasError: true, message: 'invalid data length (address type)' };
+  }
+  
   const addressType = dataView.getUint8(addressTypeIndex);
 
   let addressValue, addressLength, addressValueIndex;
 
   switch (addressType) {
-    case 1:
+    case 1: // IPv4
       addressLength = 4;
       addressValueIndex = addressTypeIndex + 1;
-      if (protocolBuffer.byteLength < addressValueIndex + addressLength) return { hasError: true, message: 'invalid data length (ipv4)' };
+      if (protocolBuffer.byteLength < addressValueIndex + addressLength) {
+        return { hasError: true, message: 'invalid data length (ipv4)' };
+      }
       addressValue = new Uint8Array(protocolBuffer.slice(addressValueIndex, addressValueIndex + addressLength)).join('.');
       break;
-    case 2:
+      
+    case 2: // Domain
+      if (protocolBuffer.byteLength < addressTypeIndex + 2) {
+        return { hasError: true, message: 'invalid data length (domain length)' };
+      }
       addressLength = dataView.getUint8(addressTypeIndex + 1);
       addressValueIndex = addressTypeIndex + 2;
-      if (protocolBuffer.byteLength < addressValueIndex + addressLength) return { hasError: true, message: 'invalid data length (domain)' };
+      if (protocolBuffer.byteLength < addressValueIndex + addressLength) {
+        return { hasError: true, message: 'invalid data length (domain)' };
+      }
       addressValue = new TextDecoder().decode(protocolBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
       break;
-    case 3:
+      
+    case 3: // IPv6
       addressLength = 16;
       addressValueIndex = addressTypeIndex + 1;
-      if (protocolBuffer.byteLength < addressValueIndex + addressLength) return { hasError: true, message: 'invalid data length (ipv6)' };
-      addressValue = Array.from({ length: 8 }, (_, i) => dataView.getUint16(addressValueIndex + i * 2, false).toString(16)).join(':');
+      if (protocolBuffer.byteLength < addressValueIndex + addressLength) {
+        return { hasError: true, message: 'invalid data length (ipv6)' };
+      }
+      addressValue = Array.from({ length: 8 }, (_, i) => 
+        dataView.getUint16(addressValueIndex + i * 2, false).toString(16)
+      ).join(':');
       break;
+      
     default:
       return { hasError: true, message: `invalid addressType: ${addressType}` };
   }
 
   const rawDataIndex = addressValueIndex + addressLength;
-  if (protocolBuffer.byteLength < rawDataIndex) return { hasError: true, message: 'invalid data length (raw data)' };
+  if (protocolBuffer.byteLength < rawDataIndex) {
+    return { hasError: true, message: 'invalid data length (raw data)' };
+  }
 
   return {
     user: userData,
@@ -1253,20 +1320,24 @@ async function HandleTCPOutBound(
   protocolResponseHeader,
   log,
   config,
-  usageCounterUpstream
+  trafficCallback
 ) {
   async function connectAndWrite(address, port, useSocks = false) {
     let tcpSocket;
+    
     if (useSocks || config.socks5Relay) {
       tcpSocket = await socks5Connect(addressType, address, port, log, config.parsedSocks5Address);
     } else {
       tcpSocket = connect({ hostname: address, port: port });
     }
+    
     remoteSocket.value = tcpSocket;
     log(`connected to ${address}:${port}`);
+    
     const writer = tcpSocket.writable.getWriter();
     await writer.write(rawClientData);
     writer.releaseLock();
+    
     return tcpSocket;
   }
 
@@ -1275,28 +1346,33 @@ async function HandleTCPOutBound(
 
   if (config.proxyIP) {
     log(`Using PROXYIP ${connectHost}:${connectPort} for target ${addressRemote}:${portRemote}`);
-  } else {
-    log(`Directly connecting to ${addressRemote}:${portRemote}`);
   }
 
   async function retry() {
-    const tcpSocket = config.enableSocks
-      ? await connectAndWrite(addressRemote, portRemote, true)
-      : await connectAndWrite(connectHost, connectPort, false);
+    try {
+      const tcpSocket = config.enableSocks
+        ? await connectAndWrite(addressRemote, portRemote, true)
+        : await connectAndWrite(connectHost, connectPort, false);
 
-    tcpSocket.closed
-      .catch(error => {
-        console.log('retry tcpSocket closed error', error);
-      })
-      .finally(() => {
-        safeCloseWebSocket(webSocket);
-      });
-    RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, null, log, usageCounterUpstream);
+      tcpSocket.closed
+        .catch(error => console.log('retry tcpSocket closed error', error))
+        .finally(() => safeCloseWebSocket(webSocket));
+        
+      RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, null, log, trafficCallback);
+    } catch (e) {
+      log(`Retry failed: ${e.message}`);
+      safeCloseWebSocket(webSocket);
+    }
   }
 
   try {
     const tcpSocket = await connectAndWrite(connectHost, connectPort, config.enableSocks);
-    RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, retry, log, usageCounterUpstream);
+    
+    tcpSocket.closed
+      .catch(error => console.log('tcpSocket closed error', error))
+      .finally(() => safeCloseWebSocket(webSocket));
+      
+    RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, retry, log, trafficCallback);
   } catch (e) {
     log(`Failed to connect to ${connectHost}:${connectPort}: ${e.message}`);
     safeCloseWebSocket(webSocket);
@@ -1306,18 +1382,26 @@ async function HandleTCPOutBound(
 function MakeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
   return new ReadableStream({
     start(controller) {
-      webSocketServer.addEventListener('message', (event) => controller.enqueue(event.data));
+      webSocketServer.addEventListener('message', (event) => {
+        controller.enqueue(event.data);
+      });
+      
       webSocketServer.addEventListener('close', () => {
         safeCloseWebSocket(webSocketServer);
         controller.close();
       });
+      
       webSocketServer.addEventListener('error', (err) => {
         log('webSocketServer has error');
         controller.error(err);
       });
+      
       const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
-      if (error) controller.error(error);
-      else if (earlyData) controller.enqueue(earlyData);
+      if (error) {
+        controller.error(error);
+      } else if (earlyData) {
+        controller.enqueue(earlyData);
+      }
     },
     pull(_controller) { },
     cancel(reason) {
@@ -1327,18 +1411,28 @@ function MakeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
   });
 }
 
-async function RemoteSocketToWS(remoteSocket, webSocket, protocolResponseHeader, retry, log, usageCounterUpstream) {
+async function RemoteSocketToWS(remoteSocket, webSocket, protocolResponseHeader, retry, log, trafficCallback) {
   let hasIncomingData = false;
+  
   try {
-    await remoteSocket.readable.pipeThrough(usageCounterUpstream).pipeTo(
+    await remoteSocket.readable.pipeTo(
       new WritableStream({
         async write(chunk) {
-          if (webSocket.readyState !== CONST.WS_READY_STATE_OPEN)
+          if (webSocket.readyState !== CONST.WS_READY_STATE_OPEN) {
             throw new Error('WebSocket is not open');
+          }
+          
           hasIncomingData = true;
+          
+          // Count upload traffic (to client)
+          if (trafficCallback) {
+            trafficCallback(chunk.byteLength);
+          }
+          
           const dataToSend = protocolResponseHeader
             ? await new Blob([protocolResponseHeader, chunk]).arrayBuffer()
             : chunk;
+            
           webSocket.send(dataToSend);
           protocolResponseHeader = null;
         },
@@ -1354,6 +1448,7 @@ async function RemoteSocketToWS(remoteSocket, webSocket, protocolResponseHeader,
     console.error('RemoteSocketToWS error:', error.stack || error);
     safeCloseWebSocket(webSocket);
   }
+  
   if (!hasIncomingData && retry) {
     log('No incoming data, retrying');
     retry();
@@ -1362,13 +1457,16 @@ async function RemoteSocketToWS(remoteSocket, webSocket, protocolResponseHeader,
 
 function base64ToArrayBuffer(base64Str) {
   if (!base64Str) return { earlyData: null, error: null };
+  
   try {
     const binaryStr = atob(base64Str.replace(/-/g, '+').replace(/_/g, '/'));
     const buffer = new ArrayBuffer(binaryStr.length);
     const view = new Uint8Array(buffer);
+    
     for (let i = 0; i < binaryStr.length; i++) {
       view[i] = binaryStr.charCodeAt(i);
     }
+    
     return { earlyData: buffer, error: null };
   } catch (error) {
     return { earlyData: null, error };
@@ -1388,8 +1486,9 @@ function safeCloseWebSocket(socket) {
   }
 }
 
-async function createDnsPipeline(webSocket, vlessResponseHeader, log, updateUpstreamUsage) {
+async function createDnsPipeline(webSocket, vlessResponseHeader, log, trafficCallback) {
   let isHeaderSent = false;
+  
   const transformStream = new TransformStream({
     transform(chunk, controller) {
       for (let index = 0; index < chunk.byteLength;) {
@@ -1412,20 +1511,26 @@ async function createDnsPipeline(webSocket, vlessResponseHeader, log, updateUpst
               headers: { 'content-type': 'application/dns-message' },
               body: chunk,
             });
+            
             const dnsQueryResult = await resp.arrayBuffer();
             const udpSize = dnsQueryResult.byteLength;
             const udpSizeBuffer = new Uint8Array([(udpSize >> 8) & 0xff, udpSize & 0xff]);
 
             if (webSocket.readyState === CONST.WS_READY_STATE_OPEN) {
               log(`DNS query successful, length: ${udpSize}`);
+              
               const blob = isHeaderSent
                 ? new Blob([udpSizeBuffer, dnsQueryResult])
                 : new Blob([vlessResponseHeader, udpSizeBuffer, dnsQueryResult]);
 
               const responseChunk = await blob.arrayBuffer();
-              updateUpstreamUsage(responseChunk.byteLength);
+              
+              // Count DNS response traffic
+              if (trafficCallback) {
+                trafficCallback(responseChunk.byteLength);
+              }
+              
               webSocket.send(responseChunk);
-
               isHeaderSent = true;
             }
           } catch (error) {
@@ -1454,12 +1559,20 @@ async function socks5Connect(addressType, addressRemote, portRemote, log, parsed
   const reader = socket.readable.getReader();
   const encoder = new TextEncoder();
 
+  // SOCKS5 greeting
   await writer.write(new Uint8Array([5, 2, 0, 2]));
   let res = (await reader.read()).value;
-  if (res[0] !== 0x05 || res[1] === 0xff) throw new Error('SOCKS5 server connection failed.');
+  
+  if (res[0] !== 0x05 || res[1] === 0xff) {
+    throw new Error('SOCKS5 server connection failed');
+  }
 
+  // Authentication if required
   if (res[1] === 0x02) {
-    if (!username || !password) throw new Error('SOCKS5 auth credentials not provided.');
+    if (!username || !password) {
+      throw new Error('SOCKS5 auth credentials not provided');
+    }
+    
     const authRequest = new Uint8Array([
       1,
       username.length,
@@ -1467,20 +1580,27 @@ async function socks5Connect(addressType, addressRemote, portRemote, log, parsed
       password.length,
       ...encoder.encode(password),
     ]);
+    
     await writer.write(authRequest);
     res = (await reader.read()).value;
-    if (res[0] !== 0x01 || res[1] !== 0x00) throw new Error('SOCKS5 authentication failed.');
+    
+    if (res[0] !== 0x01 || res[1] !== 0x00) {
+      throw new Error('SOCKS5 authentication failed');
+    }
   }
 
+  // Build destination address
   let DSTADDR;
   switch (addressType) {
-    case 1:
+    case 1: // IPv4
       DSTADDR = new Uint8Array([1, ...addressRemote.split('.').map(Number)]);
       break;
-    case 2:
+      
+    case 2: // Domain
       DSTADDR = new Uint8Array([3, addressRemote.length, ...encoder.encode(addressRemote)]);
       break;
-    case 3:
+      
+    case 3: // IPv6
       DSTADDR = new Uint8Array([
         4,
         ...addressRemote
@@ -1488,14 +1608,19 @@ async function socks5Connect(addressType, addressRemote, portRemote, log, parsed
           .flatMap((x) => [parseInt(x.slice(0, 2), 16), parseInt(x.slice(2), 16)]),
       ]);
       break;
+      
     default:
       throw new Error(`Invalid addressType for SOCKS5: ${addressType}`);
   }
 
+  // Connect request
   const socksRequest = new Uint8Array([5, 1, 0, ...DSTADDR, portRemote >> 8, portRemote & 0xff]);
   await writer.write(socksRequest);
   res = (await reader.read()).value;
-  if (res[1] !== 0x00) throw new Error('Failed to open SOCKS5 connection.');
+  
+  if (res[1] !== 0x00) {
+    throw new Error('Failed to open SOCKS5 connection');
+  }
 
   writer.releaseLock();
   reader.releaseLock();
@@ -1507,13 +1632,17 @@ function socks5AddressParser(address) {
     const [authPart, hostPart] = address.includes('@') ? address.split('@') : [null, address];
     const [hostname, portStr] = hostPart.split(':');
     const port = parseInt(portStr, 10);
-    if (!hostname || isNaN(port)) throw new Error();
+    
+    if (!hostname || isNaN(port)) {
+      throw new Error();
+    }
 
     let username, password;
     if (authPart) {
       [username, password] = authPart.split(':');
       if (!username) throw new Error();
     }
+    
     return { username, password, hostname, port };
   } catch {
     throw new Error('Invalid SOCKS5 address format. Expected [user:pass@]host:port');
@@ -1527,6 +1656,7 @@ function socks5AddressParser(address) {
 async function handleScamalyticsLookup(request, config) {
   const url = new URL(request.url);
   const ipToLookup = url.searchParams.get('ip');
+  
   if (!ipToLookup) {
     return new Response(JSON.stringify({ error: 'Missing IP parameter' }), {
       status: 400,
@@ -1535,8 +1665,9 @@ async function handleScamalyticsLookup(request, config) {
   }
 
   const { username, apiKey, baseUrl } = config.scamalytics;
+  
   if (!username || !apiKey) {
-    return new Response(JSON.stringify({ error: 'Scamalytics API credentials not configured.' }), {
+    return new Response(JSON.stringify({ error: 'Scamalytics API credentials not configured' }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' },
     });
@@ -1561,7 +1692,7 @@ async function handleScamalyticsLookup(request, config) {
 }
 
 // ============================================================================
-// USER CONFIG PAGE (BEAUTIFUL FROM SCRIPT 3)
+// USER CONFIG PAGE (Beautiful Design from Script 1)
 // ============================================================================
 
 function handleConfigPage(userID, hostName, proxyAddress, userData) {
@@ -1610,7 +1741,7 @@ function generateBeautifulConfigPage(userID, hostName, proxyAddress, expDate = '
         <div class="expiration-card-content">
           <h2 class="expiration-title">Expiration Date</h2>
           <hr class="expiration-divider">
-          <div id="expiration-display">No expiration date set.</div>
+          <div id="expiration-display">No expiration date set</div>
         </div>
       </div>
     `;
@@ -1619,7 +1750,9 @@ function generateBeautifulConfigPage(userID, hostName, proxyAddress, expDate = '
   let usageBlock = '';
   if (trafficLimit !== null && trafficLimit > 0) {
     const usedPct = ((trafficUsed / trafficLimit) * 100).toFixed(2);
-    const progressColor = usedPct > 90 ? 'linear-gradient(90deg, #e05d44, #ef4444)' : usedPct > 70 ? 'linear-gradient(90deg, #e0bc44, #f59e0b)' : 'linear-gradient(90deg, #70b570, #22c55e)';
+    const progressColor = usedPct > 90 ? 'linear-gradient(90deg, #e05d44, #ef4444)' : 
+                         usedPct > 70 ? 'linear-gradient(90deg, #e0bc44, #f59e0b)' : 
+                         'linear-gradient(90deg, #70b570, #22c55e)';
     usageBlock = `
       <div class="expiration-card usage-card">
         <div class="expiration-card-content">
@@ -1649,6 +1782,9 @@ function generateBeautifulConfigPage(userID, hostName, proxyAddress, expDate = '
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>VLESS Proxy Configuration</title>
   <link rel="icon" href="https://raw.githubusercontent.com/NiREvil/zizifn/refs/heads/Legacy/assets/favicon.png" type="image/png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@300..700&display=swap" rel="stylesheet">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <style>${getPageCSS()}</style>
 </head>
@@ -1664,142 +1800,275 @@ function generateBeautifulConfigPage(userID, hostName, proxyAddress, expDate = '
 function getPageCSS() {
   return `
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    @font-face {
+      font-family: "Aldine 401 BT Web";
+      src: url("https://pub-7a3b428c76aa411181a0f4dd7fa9064b.r2.dev/Aldine401_Mersedeh.woff2") format("woff2");
+      font-weight: 400; font-style: normal; font-display: swap;
+    }
+    @font-face {
+      font-family: "Styrene B LC";
+      src: url("https://pub-7a3b428c76aa411181a0f4dd7fa9064b.r2.dev/StyreneBLC-Regular.woff2") format("woff2");
+      font-weight: 400; font-style: normal; font-display: swap;
+    }
+    @font-face {
+      font-family: "Styrene B LC";
+      src: url("https://pub-7a3b428c76aa411181a0f4dd7fa9064b.r2.dev/StyreneBLC-Medium.woff2") format("woff2");
+      font-weight: 500; font-style: normal; font-display: swap;
+    }
     :root {
       --background-primary: #2a2421; --background-secondary: #35302c; --background-tertiary: #413b35;
-      --border-color: #5a4f45; --text-primary: #e5dfd6; --text-secondary: #b3a89d;
-      --accent-primary: #be9b7b; --accent-secondary: #d4b595;
-      --status-success: #70b570; --status-error: #e05d44;
+      --border-color: #5a4f45; --border-color-hover: #766a5f; --text-primary: #e5dfd6; --text-secondary: #b3a89d;
+      --text-accent: #ffffff; --accent-primary: #be9b7b; --accent-secondary: #d4b595; --accent-tertiary: #8d6e5c;
+      --accent-primary-darker: #8a6f56; --button-text-primary: #2a2421; --button-text-secondary: var(--text-primary);
+      --shadow-color: rgba(0, 0, 0, 0.35); --shadow-color-accent: rgba(190, 155, 123, 0.4);
+      --border-radius: 12px; --transition-speed: 0.2s; --transition-speed-fast: 0.1s; 
+      --transition-speed-medium: 0.3s; --transition-speed-long: 0.6s;
+      --status-success: #70b570; --status-error: #e05d44; --status-warning: #e0bc44; --status-info: #4f90c4;
+      --serif: "Aldine 401 BT Web", "Times New Roman", Times, Georgia, ui-serif, serif;
+      --sans-serif: "Styrene B LC", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, "Noto Color Emoji", sans-serif;
+      --mono-serif: "Fira Code", Cantarell, "Courier Prime", monospace;
     }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-family: var(--sans-serif); font-size: 16px; font-weight: 400; font-style: normal;
       background-color: var(--background-primary); color: var(--text-primary);
-      padding: 3rem; line-height: 1.5;
+      padding: 3rem; line-height: 1.5; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
     }
-    @keyframes rgb-animation { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    
+    @keyframes rgb-animation {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    
     .expiration-card, .usage-card {
       position: relative; padding: 3px; background: var(--background-secondary);
-      border-radius: 12px; margin-bottom: 24px; overflow: hidden; z-index: 1;
+      border-radius: var(--border-radius); margin-bottom: 24px; overflow: hidden; z-index: 1;
     }
+    
     .expiration-card::before, .usage-card::before {
       content: ''; position: absolute; top: -50%; left: -50%; width: 200%; height: 200%;
-      background: conic-gradient(#ff0000, #ff00ff, #0000ff, #00ffff, #00ff00, #ffff00, #ff0000);
+      background: conic-gradient(
+        #ff0000, #ff00ff, #0000ff, #00ffff, #00ff00, #ffff00, #ff0000
+      );
       animation: rgb-animation 4s linear infinite; z-index: -1;
     }
+    
     .expiration-card-content {
-      background: var(--background-secondary); padding: 20px; border-radius: 9px;
+      background: var(--background-secondary); padding: 20px; border-radius: calc(var(--border-radius) - 3px);
     }
+    
     .expiration-title {
-      font-size: 1.6rem; font-weight: 400; text-align: center;
+      font-family: var(--serif); font-size: 1.6rem; font-weight: 400; text-align: center;
       color: var(--accent-secondary); margin: 0 0 12px 0;
     }
+    
     .expiration-relative-time {
       text-align: center; font-size: 1.1rem; font-weight: 500;
       margin-bottom: 12px; padding: 4px 8px; border-radius: 6px;
     }
+    
     .expiration-relative-time.active {
       color: var(--status-success); background-color: rgba(112, 181, 112, 0.1);
     }
+    
     .expiration-relative-time.expired {
       color: var(--status-error); background-color: rgba(224, 93, 68, 0.1);
     }
+    
     .expiration-divider {
       border: 0; height: 1px; background: var(--border-color);
       margin: 0 auto 16px; width: 80%;
     }
-    #expiration-display { font-size: 0.9em; text-align: center; color: var(--text-secondary); }
-    #expiration-display span { display: block; margin-top: 8px; line-height: 1.6; }
+    
+    #expiration-display { 
+      font-size: 0.9em; text-align: center; color: var(--text-secondary); 
+    }
+    
+    #expiration-display span { 
+      display: block; margin-top: 8px; font-size: 0.9em; line-height: 1.6; 
+    }
+    
+    #expiration-display strong { 
+      color: var(--text-primary); font-weight: 500; 
+    }
+    
     .usage-progress {
       height: 10px; background: #413b35; border-radius: 5px;
       overflow: hidden; margin-bottom: 10px;
     }
-    .usage-progress div { height: 100%; transition: width 0.5s ease; }
+    
+    .usage-progress div { 
+      height: 100%; transition: width 0.5s ease; 
+    }
+    
     .container {
-      max-width: 800px; margin: 20px auto; padding: 0 12px;
-      border-radius: 12px; box-shadow: 0 6px 15px rgba(0, 0, 0, 0.2);
+      max-width: 800px; margin: 20px auto; padding: 0 12px; border-radius: var(--border-radius);
+      box-shadow: 0 6px 15px rgba(0, 0, 0, 0.2), 0 0 25px 8px var(--shadow-color-accent);
+      transition: box-shadow var(--transition-speed-medium) ease;
     }
+    
+    .container:hover { 
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25), 0 0 35px 10px var(--shadow-color-accent); 
+    }
+    
     .header { text-align: center; margin-bottom: 30px; padding-top: 30px; }
-    .header h1 { font-size: 1.8rem; margin-bottom: 2px; }
-    .header p { color: var(--text-secondary); font-size: 0.9rem; }
-    .config-card {
-      background: var(--background-secondary); border-radius: 12px;
-      padding: 20px; margin-bottom: 24px; border: 1px solid var(--border-color);
+    
+    .header h1 { 
+      font-family: var(--serif); font-weight: 400; font-size: 1.8rem; 
+      color: var(--text-accent); margin-top: 0px; margin-bottom: 2px; 
     }
+    
+    .header p { 
+      color: var(--text-secondary); font-size: 0.9rem; font-weight: 400; 
+    }
+    
+    .config-card {
+      background: var(--background-secondary); border-radius: var(--border-radius); 
+      padding: 20px; margin-bottom: 24px; border: 1px solid var(--border-color);
+      transition: border-color var(--transition-speed) ease, box-shadow var(--transition-speed) ease;
+    }
+    
+    .config-card:hover { 
+      border-color: var(--border-color-hover); box-shadow: 0 4px 8px var(--shadow-color); 
+    }
+    
     .config-title {
-      font-size: 1.6rem; color: var(--accent-secondary); margin-bottom: 16px;
-      padding-bottom: 13px; border-bottom: 1px solid var(--border-color);
+      font-family: var(--serif); font-size: 1.6rem; font-weight: 400; color: var(--accent-secondary);
+      margin-bottom: 16px; padding-bottom: 13px; border-bottom: 1px solid var(--border-color);
       display: flex; align-items: center; justify-content: space-between;
     }
+    
     .button {
       display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-      padding: 8px 16px; border-radius: 8px; font-size: 15px; font-weight: 500;
-      cursor: pointer; border: 1px solid var(--border-color);
-      background-color: var(--background-tertiary); color: var(--text-primary);
-      text-decoration: none; transition: all 0.2s;
+      padding: 8px 16px; border-radius: var(--border-radius); font-size: 15px; font-weight: 500;
+      cursor: pointer; border: 1px solid var(--border-color); background-color: var(--background-tertiary);
+      color: var(--button-text-secondary);
+      transition: background-color var(--transition-speed) ease, border-color var(--transition-speed) ease, 
+                  color var(--transition-speed) ease, transform var(--transition-speed) ease, 
+                  box-shadow var(--transition-speed) ease;
+      text-decoration: none; overflow: hidden; position: relative;
     }
-    .button:hover { background-color: #4d453e; }
-    .client-buttons {
-      display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px;
+    
+    .button:hover {
+      background-color: #4d453e; color: var(--accent-primary);
+      border-color: var(--border-color-hover); transform: translateY(-2px); 
+      box-shadow: 0 4px 8px var(--shadow-color);
     }
+    
+    .button:active { 
+      transform: translateY(0px) scale(0.98); box-shadow: none; 
+    }
+    
+    .client-buttons-container { 
+      display: flex; flex-direction: column; gap: 16px; margin-top: 16px; 
+    }
+    
+    .client-buttons-container h3 { 
+      font-family: var(--serif); font-size: 14px; color: var(--text-secondary); 
+      margin: 8px 0 -8px 0; font-weight: 400; text-align: center; 
+    }
+    
+    .client-buttons { 
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; 
+    }
+    
     .client-btn {
-      width: 100%; background-color: var(--accent-primary); color: #2a2421;
-      border-radius: 6px; transition: all 0.3s; box-shadow: 0 2px 5px rgba(0, 0, 0, 0.15);
+      width: 100%; background-color: var(--accent-primary); color: var(--background-tertiary);
+      border-radius: 6px; border-color: var(--accent-primary-darker); position: relative; overflow: hidden;
+      transition: all 0.3s cubic-bezier(0.2, 0.8, 0.2, 1); box-shadow: 0 2px 5px rgba(0, 0, 0, 0.15);
     }
+    
     .client-btn:hover {
-      background-color: var(--accent-secondary); transform: translateY(-3px);
-      box-shadow: 0 5px 15px rgba(190, 155, 123, 0.5);
+      text-transform: uppercase; letter-spacing: 0.3px; transform: translateY(-3px);
+      background-color: var(--accent-secondary); color: var(--button-text-primary);
+      box-shadow: 0 5px 15px rgba(190, 155, 123, 0.5); border-color: var(--accent-secondary);
     }
-    .client-buttons-container { display: flex; flex-direction: column; gap: 16px; margin-top: 16px; }
-    .client-buttons-container h3 {
-      font-size: 14px; color: var(--text-secondary); margin: 8px 0 -8px 0; text-align: center;
+    
+    .client-btn:active { 
+      transform: translateY(0) scale(0.98); box-shadow: 0 2px 3px rgba(0, 0, 0, 0.2); 
+      background-color: var(--accent-primary-darker); 
     }
+    
     .qr-container {
-      display: none; margin-top: 20px; background: white; padding: 16px;
-      border-radius: 8px; max-width: 288px; margin-left: auto; margin-right: auto;
+      display: none; text-align: center; margin-top: 10px; background: white; 
+      padding: 10px; border-radius: 8px; max-width: 276px; margin-left: auto; margin-right: auto;
     }
-    .footer {
-      text-align: center; margin-top: 20px; margin-bottom: 40px;
-      color: var(--text-secondary); font-size: 12px;
+    
+    .footer { 
+      text-align: center; margin-top: 20px; margin-bottom: 40px; 
+      color: var(--text-secondary); font-size: 12px; 
     }
+    
+    .footer p { margin-bottom: 0px; }
+    
     .network-info-wrapper {
-      background: var(--background-secondary); border-radius: 12px;
+      background: var(--background-secondary); border-radius: var(--border-radius);
       padding: 24px; margin-bottom: 24px; border: 1px solid var(--border-color);
     }
+    
     .network-info-header {
       display: flex; justify-content: space-between; align-items: center;
       margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--border-color);
     }
-    .network-info-header h2 { margin: 0; font-size: 1.4rem; }
+    
+    .network-info-header h2 { 
+      margin: 0; font-size: 1.4rem; font-family: var(--serif); color: var(--accent-secondary); 
+    }
+    
     .network-grid {
       display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px;
     }
+    
     .network-card {
       background: #2f2a26; border: 1px solid var(--border-color);
       border-radius: 8px; padding: 16px;
     }
+    
     .network-title {
       font-size: 1.1em; margin-top: 0; margin-bottom: 12px;
       border-bottom: 1px solid var(--border-color); padding-bottom: 8px;
-      color: var(--accent-secondary);
+      color: var(--accent-secondary); font-family: var(--serif);
     }
+    
     .network-info-grid { display: grid; gap: 8px; font-size: 0.9em; }
+    
     .network-info-grid strong {
       color: var(--text-secondary); font-weight: 400; display: inline-block; min-width: 90px;
     }
+    
     .network-info-grid span { color: var(--text-primary); font-weight: 500; }
+    
     .skeleton {
       display: inline-block; width: 120px; height: 1em;
       background-color: var(--background-tertiary); border-radius: 4px;
     }
+    
+    @keyframes loading {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+    
     @media (max-width: 768px) {
       body { padding: 20px; }
-      .container { padding: 0 14px; }
-      .network-grid { grid-template-columns: 1fr; gap: 18px; }
+      .container { padding: 0 14px; width: min(100%, 768px); }
+      .network-grid { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 18px; }
+      .header h1 { font-size: 1.8rem; }
+      .header p { font-size: 0.7rem; }
+      .network-card { padding: 14px; gap: 18px; }
+      .network-title { font-size: 16px; }
       .client-buttons { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
     }
+    
     @media (max-width: 480px) {
       body { padding: 16px; }
-      .container { padding: 0 12px; }
-      .client-buttons { grid-template-columns: 1fr; }
+      .container { padding: 0 12px; width: min(100%, 390px); }
+      .header h1 { font-size: 20px; }
+      .header p { font-size: 8px; }
+      .network-card { padding: 14px; gap: 16px; }
+      .network-grid { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
+      .network-title { font-size: 14px; }
+      .client-buttons { grid-template-columns: repeat(auto-fill, minmax(100%, 1fr)); }
+      .button { padding: 4px 8px; font-size: 11px; }
+      .footer { font-size: 10px; }
     }
   `;
 }
@@ -1900,18 +2169,22 @@ function getPageScript() {
       navigator.clipboard.writeText(text).then(() => {
         button.textContent = 'Copied!';
         setTimeout(() => { button.textContent = originalText; }, 1500);
+      }).catch(err => {
+        console.error('Failed to copy:', err);
       });
     }
 
     function toggleQR(id, url) {
       const container = document.getElementById('qr-' + id + '-container');
       const qrElement = document.getElementById('qr-' + id);
+      
       if (container.style.display === 'none' || container.style.display === '') {
         container.style.display = 'block';
         if (!qrElement.hasChildNodes()) {
           new QRCode(qrElement, {
             text: url, width: 256, height: 256,
-            colorDark: "#2a2421", colorLight: "#e5dfd6"
+            colorDark: "#2a2421", colorLight: "#e5dfd6",
+            correctLevel: QRCode.CorrectLevel.H
           });
         }
       } else {
@@ -1922,17 +2195,29 @@ function getPageScript() {
     function displayExpirationTimes() {
       const expElement = document.getElementById('expiration-display');
       const relativeElement = document.getElementById('expiration-relative');
-      if (!expElement?.dataset.utcTime) return;
+      
+      if (!expElement || !expElement.dataset.utcTime) {
+        if (expElement) expElement.textContent = 'Expiration time not available';
+        if (relativeElement) relativeElement.style.display = 'none';
+        return;
+      }
 
       const utcDate = new Date(expElement.dataset.utcTime);
-      if (isNaN(utcDate.getTime())) return;
+      if (isNaN(utcDate.getTime())) {
+        expElement.textContent = 'Invalid expiration time format';
+        if (relativeElement) relativeElement.style.display = 'none';
+        return;
+      }
 
-      const diffSeconds = (utcDate.getTime() - new Date().getTime()) / 1000;
+      const now = new Date();
+      const diffSeconds = (utcDate.getTime() - now.getTime()) / 1000;
       const isExpired = diffSeconds < 0;
 
       const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
       let relTime = '';
-      if (Math.abs(diffSeconds) < 3600) relTime = rtf.format(Math.round(diffSeconds / 60), 'minute');
+      
+      if (Math.abs(diffSeconds) < 60) relTime = rtf.format(Math.round(diffSeconds), 'second');
+      else if (Math.abs(diffSeconds) < 3600) relTime = rtf.format(Math.round(diffSeconds / 60), 'minute');
       else if (Math.abs(diffSeconds) < 86400) relTime = rtf.format(Math.round(diffSeconds / 3600), 'hour');
       else relTime = rtf.format(Math.round(diffSeconds / 86400), 'day');
 
@@ -1941,9 +2226,15 @@ function getPageScript() {
         relativeElement.classList.add(isExpired ? 'expired' : 'active');
       }
 
-      const localTime = utcDate.toLocaleString(undefined, { timeZoneName: 'short' });
-      const tehranTime = utcDate.toLocaleString('en-US', { timeZone: 'Asia/Tehran', hour12: true });
-      const utcTime = utcDate.toISOString().substring(0, 19).replace('T', ' ') + ' UTC';
+      const commonOptions = {
+        year: 'numeric', month: 'long', day: 'numeric',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hour12: true, timeZoneName: 'short'
+      };
+
+      const localTime = utcDate.toLocaleString(undefined, commonOptions);
+      const tehranTime = utcDate.toLocaleString('en-US', { ...commonOptions, timeZone: 'Asia/Tehran' });
+      const utcTime = utcDate.toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
 
       expElement.innerHTML = \`
         <span><strong>Your Local Time:</strong> \${localTime}</span>
@@ -2006,11 +2297,14 @@ function getPageScript() {
               console.error('DNS resolution failed:', e);
             }
           }
+          
           const proxyGeo = await fetchIpApiInfo(resolvedIp);
           if (proxyGeo) {
             document.getElementById('proxy-ip').textContent = proxyGeo.ip || 'N/A';
-            document.getElementById('proxy-location').textContent = [proxyGeo.city, proxyGeo.country_name].filter(Boolean).join(', ') || 'N/A';
-            document.getElementById('proxy-isp').textContent = proxyGeo.isp || proxyGeo.organisation || 'N/A';
+            document.getElementById('proxy-location').textContent = 
+              [proxyGeo.city, proxyGeo.country_name].filter(Boolean).join(', ') || 'N/A';
+            document.getElementById('proxy-isp').textContent = 
+              proxyGeo.isp || proxyGeo.organisation || 'N/A';
           }
         }
 
@@ -2018,12 +2312,19 @@ function getPageScript() {
         if (clientIp) {
           document.getElementById('client-ip').textContent = clientIp;
           const scamalyticsData = await fetchScamalyticsInfo(clientIp);
+          
           if (scamalyticsData?.scamalytics?.status === 'ok') {
             const sa = scamalyticsData.scamalytics;
             const dbip = scamalyticsData.external_datasources?.dbip;
-            document.getElementById('client-location').textContent = [dbip?.ip_city, dbip?.ip_country_name].filter(Boolean).join(', ') || 'N/A';
-            document.getElementById('client-isp').textContent = sa.scamalytics_isp || dbip?.isp_name || 'N/A';
-            const riskText = sa.scamalytics_score !== undefined ? \`\${sa.scamalytics_score} - \${sa.scamalytics_risk}\` : 'N/A';
+            
+            document.getElementById('client-location').textContent = 
+              [dbip?.ip_city, dbip?.ip_country_name].filter(Boolean).join(', ') || 'N/A';
+            document.getElementById('client-isp').textContent = 
+              sa.scamalytics_isp || dbip?.isp_name || 'N/A';
+            
+            const riskText = sa.scamalytics_score !== undefined 
+              ? \`\${sa.scamalytics_score} - \${sa.scamalytics_risk}\` 
+              : 'N/A';
             document.getElementById('client-risk').textContent = riskText;
           }
         }
@@ -2037,11 +2338,15 @@ function getPageScript() {
       loadNetworkInfo();
 
       document.querySelectorAll('.button[data-clipboard-text]').forEach(button => {
-        button.addEventListener('click', () => copyToClipboard(button, button.dataset.clipboardText));
+        button.addEventListener('click', () => {
+          copyToClipboard(button, button.dataset.clipboardText);
+        });
       });
 
       document.getElementById('refresh-network-btn')?.addEventListener('click', () => {
-        document.querySelectorAll('.network-info-grid span').forEach(el => el.innerHTML = '<span class="skeleton"></span>');
+        document.querySelectorAll('.network-info-grid span').forEach(el => {
+          el.innerHTML = '<span class="skeleton"></span>';
+        });
         loadNetworkInfo();
       });
     });
@@ -2057,17 +2362,18 @@ export default {
     const cfg = Config.fromEnv(env);
     const url = new URL(request.url);
 
-    // Admin panel
+    // Admin panel routes
     if (url.pathname.startsWith('/admin')) {
       return handleAdminRequest(request, env, ctx);
     }
 
-    // WebSocket/VLESS Protocol
+    // WebSocket/VLESS Protocol handler
     const upgradeHeader = request.headers.get('Upgrade');
     if (upgradeHeader?.toLowerCase() === 'websocket') {
       if (!env.DB || !env.USER_KV) {
-        return new Response('Service not configured', { status: 503 });
+        return new Response('Service not configured properly', { status: 503 });
       }
+      
       const requestConfig = {
         userID: cfg.userID,
         proxyIP: cfg.proxyIP,
@@ -2077,10 +2383,11 @@ export default {
         enableSocks: cfg.socks5.enabled,
         parsedSocks5Address: cfg.socks5.enabled ? socks5AddressParser(cfg.socks5.address) : {},
       };
+      
       return await ProtocolOverWSHandler(request, requestConfig, env, ctx);
     }
 
-    // Scamalytics lookup
+    // Scamalytics lookup endpoint
     if (url.pathname === '/scamalytics-lookup') {
       return handleScamalyticsLookup(request, cfg);
     }
@@ -2088,39 +2395,52 @@ export default {
     // Subscription handlers
     const handleSubscription = async (core) => {
       const uuid = url.pathname.slice(`/${core}/`.length);
-      if (!isValidUUID(uuid)) return new Response('Invalid UUID', { status: 400 });
+      if (!isValidUUID(uuid)) {
+        return new Response('Invalid UUID', { status: 400 });
+      }
       
       const userData = await getUserData(env, uuid, ctx);
-      if (!userData) return new Response('Invalid user', { status: 403 });
+      if (!userData) {
+        return new Response('Invalid user', { status: 403 });
+      }
       
       if (isExpired(userData.expiration_date, userData.expiration_time)) {
         return new Response('User expired', { status: 403 });
       }
       
-      if (userData.traffic_limit && userData.traffic_limit > 0 && userData.traffic_used >= userData.traffic_limit) {
+      if (userData.traffic_limit && userData.traffic_limit > 0 && 
+          userData.traffic_used >= userData.traffic_limit) {
         return new Response('Data limit reached', { status: 403 });
       }
       
       return handleIpSubscription(core, uuid, url.hostname);
     };
 
-    if (url.pathname.startsWith('/xray/')) return handleSubscription('xray');
-    if (url.pathname.startsWith('/sb/')) return handleSubscription('sb');
+    if (url.pathname.startsWith('/xray/')) {
+      return handleSubscription('xray');
+    }
+    
+    if (url.pathname.startsWith('/sb/')) {
+      return handleSubscription('sb');
+    }
 
-    // Config page
+    // User config page
     const path = url.pathname.slice(1);
     if (isValidUUID(path)) {
       const userData = await getUserData(env, path, ctx);
-      if (!userData) return new Response('Invalid user', { status: 403 });
+      if (!userData) {
+        return new Response('Invalid user', { status: 403 });
+      }
       
       return handleConfigPage(path, url.hostname, cfg.proxyAddress, userData);
     }
 
-    // Root proxy (if configured)
+    // Root proxy fallback (if configured)
     if (env.ROOT_PROXY_URL) {
       try {
         const proxyUrl = new URL(env.ROOT_PROXY_URL);
         const targetUrl = new URL(request.url);
+        
         targetUrl.hostname = proxyUrl.hostname;
         targetUrl.protocol = proxyUrl.protocol;
         targetUrl.port = proxyUrl.port;
@@ -2133,6 +2453,7 @@ export default {
         const response = await fetch(newRequest);
         const mutableHeaders = new Headers(response.headers);
         mutableHeaders.delete('Content-Security-Policy');
+        mutableHeaders.delete('Content-Security-Policy-Report-Only');
         mutableHeaders.delete('X-Frame-Options');
         
         return new Response(response.body, {
@@ -2141,7 +2462,8 @@ export default {
           headers: mutableHeaders
         });
       } catch (e) {
-        return new Response(`Proxy error: ${e.message}`, { status: 502 });
+        console.error(`Reverse Proxy Error: ${e.message}`);
+        return new Response(`Proxy configuration error: ${e.message}`, { status: 502 });
       }
     }
 
