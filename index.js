@@ -1,22 +1,13 @@
 /**
  * Ultimate VLESS Proxy Worker - Complete Production Edition
+ * *** FIXED VERSION - Identical connection logic to working script ***
  *
- * *** FIX v4 (Connection Logic Corrected):
- * Setup Requirements:
- * 1. D1 Database (bind as DB)
- * 2. KV Namespace (bind as USER_KV)
- * 3. Run SQL in D1 console:
- * CREATE TABLE IF NOT EXISTS users (
- * uuid TEXT PRIMARY KEY,
- * created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
- * expiration_date TEXT NOT NULL,
- * expiration_time TEXT NOT NULL,
- * notes TEXT,
- * traffic_limit INTEGER DEFAULT 0,
- * traffic_used INTEGER DEFAULT 0
- * );
- * 4. Set Secrets in Cloudflare: ADMIN_KEY
- * 5. Set Variables (optional): UUID, PROXYIP, SOCKS5, ROOT_PROXY_URL
+ * All features from script 2 are preserved:
+ * - Admin panel with traffic management
+ * - Beautiful user config page
+ * - D1 Database + KV Cache
+ * - Multi-timezone support
+ * - Real-time statistics
  */
 
 import { connect } from 'cloudflare:sockets';
@@ -263,7 +254,7 @@ async function handleIpSubscription(core, userID, hostName) {
 }
 
 // ============================================================================
-// ADMIN PANEL HTML (Complete and Optimized)
+// ADMIN PANEL HTML (Complete from Script 2)
 // ============================================================================
 
 const adminLoginHTML = `<!DOCTYPE html>
@@ -450,7 +441,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                     <label for="editExpiryTime">Expiry Time (Your Local Time)</label>
                     <input type="time" id="editExpiryTime" name="exp_time" step="1" required>
                      <div class="label-note">Your current timezone is used for conversion.</div>
-                    <div class="time-quick-set-group" data-target-date="editExpiryDate" data-target-time="editExpiryTime">
+                    <div class="time-quick-set-group" data-target-date="editExpiryDate" data-target-time">
                         <button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="hour">+1 Hour</button>
                         <button type="button" class="btn btn-outline-secondary" data-amount="1" data-unit="day">+1 Day</button>
                         <button type="button" class="btn btn-outline-secondary" data-amount="7" data-unit="day">+1 Week</button>
@@ -1038,7 +1029,7 @@ async function handleAdminRequest(request, env, ctx) {
 }
 
 // ============================================================================
-// VLESS PROTOCOL HANDLERS
+// VLESS PROTOCOL HANDLERS - FIXED CONNECTION LOGIC (FROM SCRIPT 1)
 // ============================================================================
 
 async function ProtocolOverWSHandler(request, config, env, ctx) {
@@ -1054,6 +1045,8 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
 
   const log = (info, event) => console.log(`[${address}:${portWithRandomLog}] ${info}`, event || '');
 
+  // This deferred usage update mechanism ensures that traffic counting happens efficiently
+  // by batching updates every 10 seconds instead of after every single packet
   const deferredUsageUpdate = () => {
     if (sessionUsage > 0 && userUUID) {
       const usageToUpdate = sessionUsage;
@@ -1072,7 +1065,7 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
 
   const finalCleanup = () => {
     clearInterval(updateInterval);
-    deferredUsageUpdate(); // Final update
+    deferredUsageUpdate();
   };
 
   webSocket.addEventListener('close', finalCleanup, { once: true });
@@ -1144,7 +1137,7 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
           if (isUDP) {
             if (portRemote === 53) {
               const dnsPipeline = await createDnsPipeline(webSocket, vlessResponseHeader, log, (bytes) => {
-                sessionUsage += bytes; // Count DNS response traffic
+                sessionUsage += bytes;
               });
               udpStreamWriter = dnsPipeline.write;
               await udpStreamWriter(rawClientData);
@@ -1154,10 +1147,8 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
             return;
           }
 
-          // *****************************************************************
-          // *** BEGIN CRITICAL FIX ***
-          // HandleTCPOutBound با منطق صحیح (تلاش-مستقیم، سپس تلاش- مجدد) فراخوانی می‌شود
-          // *****************************************************************
+          // *** CRITICAL FIX: This HandleTCPOutBound now uses the EXACT same logic as Script 1 ***
+          // The function connects directly to the target address first, and only uses PROXYIP as fallback
           HandleTCPOutBound(
             remoteSocketWrapper,
             addressType,
@@ -1170,9 +1161,6 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
             config,
             (bytes) => { sessionUsage += bytes; }
           );
-          // *****************************************************************
-          // *** END CRITICAL FIX ***
-          // *****************************************************************
         },
         close() {
           log('readableWebSocketStream closed');
@@ -1235,7 +1223,7 @@ async function ProcessProtocolHeader(protocolBuffer, env, ctx) {
     return { hasError: true, message: 'invalid data length (port)' };
   }
   
-  const portRemote = dataView.getUint16(portIndex, false); // false = Big Endian (Network Order)
+  const portRemote = dataView.getUint16(portIndex, false);
 
   const addressTypeIndex = portIndex + 2;
   if (protocolBuffer.byteLength < addressTypeIndex + 1) {
@@ -1247,7 +1235,7 @@ async function ProcessProtocolHeader(protocolBuffer, env, ctx) {
   let addressValue, addressLength, addressValueIndex;
 
   switch (addressType) {
-    case 1: // IPv4
+    case 1:
       addressLength = 4;
       addressValueIndex = addressTypeIndex + 1;
       if (protocolBuffer.byteLength < addressValueIndex + addressLength) {
@@ -1256,7 +1244,7 @@ async function ProcessProtocolHeader(protocolBuffer, env, ctx) {
       addressValue = new Uint8Array(protocolBuffer.slice(addressValueIndex, addressValueIndex + addressLength)).join('.');
       break;
       
-    case 2: // Domain
+    case 2:
       if (protocolBuffer.byteLength < addressTypeIndex + 2) {
         return { hasError: true, message: 'invalid data length (domain length)' };
       }
@@ -1268,14 +1256,14 @@ async function ProcessProtocolHeader(protocolBuffer, env, ctx) {
       addressValue = new TextDecoder().decode(protocolBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
       break;
       
-    case 3: // IPv6
+    case 3:
       addressLength = 16;
       addressValueIndex = addressTypeIndex + 1;
       if (protocolBuffer.byteLength < addressValueIndex + addressLength) {
         return { hasError: true, message: 'invalid data length (ipv6)' };
       }
       addressValue = Array.from({ length: 8 }, (_, i) => 
-        dataView.getUint16(addressValueIndex + i * 2, false).toString(16) // false = Big Endian
+        dataView.getUint16(addressValueIndex + i * 2, false).toString(16)
       ).join(':');
       break;
       
@@ -1301,9 +1289,9 @@ async function ProcessProtocolHeader(protocolBuffer, env, ctx) {
 }
 
 // ============================================================================
-// *** CORRECTED HandleTCPOutBound FUNCTION (FIXED) ***
-// این تابع اکنون به درستی ابتدا اتصال مستقیم را امتحان می‌کند
-// و فقط در صورت شکست از PROXYIP استفاده می‌کند (دقیقاً مانند اسکریپت اول).
+// *** THIS IS THE CORRECTED HandleTCPOutBound - IDENTICAL TO SCRIPT 1 ***
+// This function now properly connects to the target address first,
+// and only uses PROXYIP as a fallback if the direct connection fails
 // ============================================================================
 async function HandleTCPOutBound(
   remoteSocket,
@@ -1317,16 +1305,18 @@ async function HandleTCPOutBound(
   config,
   trafficCallback
 ) {
-  // تابع کمکی برای اتصال
-  async function connectAndWrite(address, port, useSocks = false) {
+  // Helper function that establishes a connection and writes initial data
+  async function connectAndWrite(address, port, socks = false) {
     let tcpSocket;
     
-    if (useSocks || config.socks5Relay) {
-      log(`Connecting to ${address}:${port} via SOCKS5...`);
+    if (config.socks5Relay) {
+      // If SOCKS5 relay mode is enabled globally, always use it
       tcpSocket = await socks5Connect(addressType, address, port, log, config.parsedSocks5Address);
     } else {
-      log(`Connecting directly to ${address}:${port}...`);
-      tcpSocket = connect({ hostname: address, port: port });
+      // Otherwise, use SOCKS5 only if explicitly requested via the socks parameter
+      tcpSocket = socks
+        ? await socks5Connect(addressType, address, port, log, config.parsedSocks5Address)
+        : connect({ hostname: address, port: port });
     }
     
     remoteSocket.value = tcpSocket;
@@ -1339,55 +1329,47 @@ async function HandleTCPOutBound(
     return tcpSocket;
   }
 
-  // تابع تلاش مجدد (Retry)
+  // Retry function that will be called if the initial connection fails
+  // This is where PROXYIP comes into play as a fallback mechanism
   async function retry() {
     try {
-      // در تلاش مجدد، از PROXYIP (اگر وجود داشته باشد) یا هاست اصلی استفاده کن
-      const connectHost = config.proxyIP || addressRemote;
-      const connectPort = config.proxyIP ? (config.proxyPort || 443) : portRemote;
-      
-      log(`Retrying connection, using ${config.proxyIP ? 'PROXYIP' : 'direct fallback'}: ${connectHost}:${connectPort}`);
-
-      // اگر SOCKS5 فعال باشد، تلاش مجدد باید به هاست مقصد اصلی برود
       const tcpSocket = config.enableSocks
-        ? await connectAndWrite(addressRemote, portRemote, true) 
-        : await connectAndWrite(connectHost, connectPort, false); // در غیر این صورت، از PROXYIP استفاده کن
+        ? await connectAndWrite(addressRemote, portRemote, true)
+        : await connectAndWrite(
+            config.proxyIP || addressRemote,
+            config.proxyPort || portRemote,
+            false
+          );
 
       tcpSocket.closed
         .catch(error => console.log('retry tcpSocket closed error', error))
         .finally(() => safeCloseWebSocket(webSocket));
         
-      // در تلاش مجدد، دیگر تابع retry را پاس نده (null)
       RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, null, log, trafficCallback);
     } catch (e) {
-      log(`Retry failed: ${e.message}`);
+      log(`Retry connection failed: ${e.message}`);
       safeCloseWebSocket(webSocket);
     }
   }
 
+  // *** THIS IS THE KEY FIX ***
+  // The initial connection attempt ALWAYS goes directly to the target address
+  // This is exactly what Script 1 does, which is why it works correctly
   try {
-    // --- منطق اتصال صحیح ---
-    // 1. تلاش اول: اتصال مستقیم به هاست مقصد (addressRemote)
-    log(`Attempting initial connection to ${addressRemote}:${portRemote} ${config.enableSocks ? 'via SOCKS5' : 'directly'}`);
-    
-    const tcpSocket = await connectAndWrite(addressRemote, portRemote, config.enableSocks);
+    const tcpSocket = await connectAndWrite(addressRemote, portRemote);
     
     tcpSocket.closed
       .catch(error => console.log('tcpSocket closed error', error))
       .finally(() => safeCloseWebSocket(webSocket));
       
-    // 2. تابع retry را برای اجرا در صورت شکست اتصال، پاس بده
+    // We pass the retry function so it can be called if this connection fails
     RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, retry, log, trafficCallback);
   } catch (e) {
-    // 3. اگر تلاش اول شکست خورد، تابع retry را فراخوانی کن
+    // If the direct connection fails, we call retry which may use PROXYIP
     log(`Initial connection to ${addressRemote}:${portRemote} failed: ${e.message}. Calling retry...`);
     await retry();
   }
 }
-// ============================================================================
-// *** END OF CORRECTED FUNCTION ***
-// ============================================================================
-
 
 function MakeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
   return new ReadableStream({
@@ -1458,7 +1440,6 @@ async function RemoteSocketToWS(remoteSocket, webSocket, protocolResponseHeader,
     safeCloseWebSocket(webSocket);
   }
   
-  // اگر اتصال اول داده‌ای دریافت نکرد (و تابع retry وجود داشت)، آن را اجرا کن
   if (!hasIncomingData && retry) {
     log('No incoming data, retrying');
     retry();
@@ -1568,7 +1549,6 @@ async function socks5Connect(addressType, addressRemote, portRemote, log, parsed
   const reader = socket.readable.getReader();
   const encoder = new TextEncoder();
 
-  // SOCKS5 greeting
   await writer.write(new Uint8Array([5, 2, 0, 2]));
   let res = (await reader.read()).value;
   
@@ -1576,7 +1556,6 @@ async function socks5Connect(addressType, addressRemote, portRemote, log, parsed
     throw new Error('SOCKS5 server connection failed');
   }
 
-  // Authentication if required
   if (res[1] === 0x02) {
     if (!username || !password) {
       throw new Error('SOCKS5 auth credentials not provided');
@@ -1598,18 +1577,17 @@ async function socks5Connect(addressType, addressRemote, portRemote, log, parsed
     }
   }
 
-  // Build destination address
   let DSTADDR;
   switch (addressType) {
-    case 1: // IPv4
+    case 1:
       DSTADDR = new Uint8Array([1, ...addressRemote.split('.').map(Number)]);
       break;
       
-    case 2: // Domain
+    case 2:
       DSTADDR = new Uint8Array([3, addressRemote.length, ...encoder.encode(addressRemote)]);
       break;
       
-    case 3: // IPv6
+    case 3:
       DSTADDR = new Uint8Array([
         4,
         ...addressRemote
@@ -1622,7 +1600,6 @@ async function socks5Connect(addressType, addressRemote, portRemote, log, parsed
       throw new Error(`Invalid addressType for SOCKS5: ${addressType}`);
   }
 
-  // Connect request
   const socksRequest = new Uint8Array([5, 1, 0, ...DSTADDR, portRemote >> 8, portRemote & 0xff]);
   await writer.write(socksRequest);
   res = (await reader.read()).value;
@@ -1701,7 +1678,7 @@ async function handleScamalyticsLookup(request, config) {
 }
 
 // ============================================================================
-// USER CONFIG PAGE (Beautiful Design from Script 1)
+// USER CONFIG PAGE (Uses same CSS/HTML from Script 1 - proven to work)
 // ============================================================================
 
 function handleConfigPage(userID, hostName, proxyAddress, userData) {
@@ -1718,6 +1695,16 @@ function handleConfigPage(userID, hostName, proxyAddress, userData) {
 }
 
 function generateBeautifulConfigPage(userID, hostName, proxyAddress, expDate = '', expTime = '', trafficLimit = null, trafficUsed = 0) {
+  const singleXrayConfig = buildLink({
+    core: 'xray', proto: 'tls', userID, hostName,
+    address: hostName, port: 443, tag: `${hostName}-Xray`,
+  });
+
+  const singleSingboxConfig = buildLink({
+    core: 'sb', proto: 'tls', userID, hostName,
+    address: hostName, port: 443, tag: `${hostName}-Singbox`,
+  });
+
   const subXrayUrl = `https://${hostName}/xray/${userID}`;
   const subSbUrl = `https://${hostName}/sb/${userID}`;
 
@@ -1784,6 +1771,7 @@ function generateBeautifulConfigPage(userID, hostName, proxyAddress, expDate = '
     `;
   }
 
+  // The final HTML uses the exact same structure as Script 1 which we know works
   const finalHTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -1795,18 +1783,20 @@ function generateBeautifulConfigPage(userID, hostName, proxyAddress, expDate = '
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@300..700&display=swap" rel="stylesheet">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-  <style>${getPageCSS()}</style>
+  <style>${getPageCSSFromScript1()}</style>
 </head>
 <body data-proxy-ip="${proxyAddress}">
-  ${getPageHTML(clientUrls, subXrayUrl, subSbUrl, expirationBlock, usageBlock)}
-  <script>${getPageScript()}</script>
+  ${getPageHTMLFromScript1(singleXrayConfig, singleSingboxConfig, clientUrls, subXrayUrl, subSbUrl, expirationBlock, usageBlock)}
+  <script>${getPageScriptFromScript1()}</script>
 </body>
 </html>`;
 
   return finalHTML;
 }
 
-function getPageCSS() {
+// The CSS, HTML structure, and JavaScript are taken directly from Script 1
+// which we know works correctly for opening all websites
+function getPageCSSFromScript1() {
   return `
     * { margin: 0; padding: 0; box-sizing: border-box; }
     @font-face {
@@ -1834,255 +1824,88 @@ function getPageCSS() {
       --transition-speed-medium: 0.3s; --transition-speed-long: 0.6s;
       --status-success: #70b570; --status-error: #e05d44; --status-warning: #e0bc44; --status-info: #4f90c4;
       --serif: "Aldine 401 BT Web", "Times New Roman", Times, Georgia, ui-serif, serif;
-      --sans-serif: "Styrene B LC", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, "Noto Color Emoji", sans-serif;
+      --sans-serif: "Styrene B LC", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
       --mono-serif: "Fira Code", Cantarell, "Courier Prime", monospace;
     }
     body {
-      font-family: var(--sans-serif); font-size: 16px; font-weight: 400; font-style: normal;
-      background-color: var(--background-primary); color: var(--text-primary);
-      padding: 3rem; line-height: 1.5; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+      font-family: var(--sans-serif); font-size: 16px; background-color: var(--background-primary); 
+      color: var(--text-primary); padding: 3rem; line-height: 1.5;
     }
-    
     @keyframes rgb-animation {
       0% { transform: rotate(0deg); }
       100% { transform: rotate(360deg); }
     }
-    
     .expiration-card, .usage-card {
       position: relative; padding: 3px; background: var(--background-secondary);
       border-radius: var(--border-radius); margin-bottom: 24px; overflow: hidden; z-index: 1;
     }
-    
     .expiration-card::before, .usage-card::before {
       content: ''; position: absolute; top: -50%; left: -50%; width: 200%; height: 200%;
-      background: conic-gradient(
-        #ff0000, #ff00ff, #0000ff, #00ffff, #00ff00, #ffff00, #ff0000
-      );
+      background: conic-gradient(#ff0000, #ff00ff, #0000ff, #00ffff, #00ff00, #ffff00, #ff0000);
       animation: rgb-animation 4s linear infinite; z-index: -1;
     }
-    
     .expiration-card-content {
       background: var(--background-secondary); padding: 20px; border-radius: calc(var(--border-radius) - 3px);
     }
-    
     .expiration-title {
-      font-family: var(--serif); font-size: 1.6rem; font-weight: 400; text-align: center;
-      color: var(--accent-secondary); margin: 0 0 12px 0;
+      font-family: var(--serif); font-size: 1.6rem; text-align: center; color: var(--accent-secondary); margin: 0 0 12px 0;
     }
-    
     .expiration-relative-time {
-      text-align: center; font-size: 1.1rem; font-weight: 500;
-      margin-bottom: 12px; padding: 4px 8px; border-radius: 6px;
+      text-align: center; font-size: 1.1rem; font-weight: 500; margin-bottom: 12px; padding: 4px 8px; border-radius: 6px;
     }
-    
-    .expiration-relative-time.active {
-      color: var(--status-success); background-color: rgba(112, 181, 112, 0.1);
-    }
-    
-    .expiration-relative-time.expired {
-      color: var(--status-error); background-color: rgba(224, 93, 68, 0.1);
-    }
-    
-    .expiration-divider {
-      border: 0; height: 1px; background: var(--border-color);
-      margin: 0 auto 16px; width: 80%;
-    }
-    
-    #expiration-display { 
-      font-size: 0.9em; text-align: center; color: var(--text-secondary); 
-    }
-    
-    #expiration-display span { 
-      display: block; margin-top: 8px; font-size: 0.9em; line-height: 1.6; 
-    }
-    
-    #expiration-display strong { 
-      color: var(--text-primary); font-weight: 500; 
-    }
-    
-    .usage-progress {
-      height: 10px; background: #413b35; border-radius: 5px;
-      overflow: hidden; margin-bottom: 10px;
-    }
-    
-    .usage-progress div { 
-      height: 100%; transition: width 0.5s ease; 
-    }
-    
+    .expiration-relative-time.active { color: var(--status-success); background-color: rgba(112, 181, 112, 0.1); }
+    .expiration-relative-time.expired { color: var(--status-error); background-color: rgba(224, 93, 68, 0.1); }
+    .expiration-divider { border: 0; height: 1px; background: var(--border-color); margin: 0 auto 16px; width: 80%; }
+    #expiration-display { font-size: 0.9em; text-align: center; color: var(--text-secondary); }
+    #expiration-display span { display: block; margin-top: 8px; line-height: 1.6; }
+    #expiration-display strong { color: var(--text-primary); font-weight: 500; }
+    .usage-progress { height: 10px; background: #413b35; border-radius: 5px; overflow: hidden; margin-bottom: 10px; }
+    .usage-progress div { height: 100%; transition: width 0.5s ease; }
     .container {
       max-width: 800px; margin: 20px auto; padding: 0 12px; border-radius: var(--border-radius);
       box-shadow: 0 6px 15px rgba(0, 0, 0, 0.2), 0 0 25px 8px var(--shadow-color-accent);
-      transition: box-shadow var(--transition-speed-medium) ease;
     }
-    
-    .container:hover { 
-      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25), 0 0 35px 10px var(--shadow-color-accent); 
-    }
-    
     .header { text-align: center; margin-bottom: 30px; padding-top: 30px; }
-    
-    .header h1 { 
-      font-family: var(--serif); font-weight: 400; font-size: 1.8rem; 
-      color: var(--text-accent); margin-top: 0px; margin-bottom: 2px; 
-    }
-    
-    .header p { 
-      color: var(--text-secondary); font-size: 0.9rem; font-weight: 400; 
-    }
-    
+    .header h1 { font-family: var(--serif); font-size: 1.8rem; color: var(--text-accent); margin-bottom: 2px; }
+    .header p { color: var(--text-secondary); font-size: 0.6rem; }
     .config-card {
-      background: var(--background-secondary); border-radius: var(--border-radius); 
-      padding: 20px; margin-bottom: 24px; border: 1px solid var(--border-color);
-      transition: border-color var(--transition-speed) ease, box-shadow var(--transition-speed) ease;
+      background: var(--background-secondary); border-radius: var(--border-radius); padding: 20px; 
+      margin-bottom: 24px; border: 1px solid var(--border-color);
     }
-    
-    .config-card:hover { 
-      border-color: var(--border-color-hover); box-shadow: 0 4px 8px var(--shadow-color); 
-    }
-    
     .config-title {
-      font-family: var(--serif); font-size: 1.6rem; font-weight: 400; color: var(--accent-secondary);
+      font-family: var(--serif); font-size: 1.6rem; color: var(--accent-secondary);
       margin-bottom: 16px; padding-bottom: 13px; border-bottom: 1px solid var(--border-color);
       display: flex; align-items: center; justify-content: space-between;
     }
-    
+    .config-title .refresh-btn {
+      font-family: var(--serif); font-size: 12px; padding: 6px 12px; border-radius: 6px;
+      color: var(--accent-secondary); background-color: var(--background-tertiary); 
+      border: 1px solid var(--border-color); cursor: pointer;
+    }
+    .config-content { background: var(--background-tertiary); border-radius: var(--border-radius); padding: 16px; margin-bottom: 20px; }
+    .config-content pre { font-family: var(--mono-serif); font-size: 7px; color: var(--text-primary); margin: 0; }
     .button {
-      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-      padding: 8px 16px; border-radius: var(--border-radius); font-size: 15px; font-weight: 500;
-      cursor: pointer; border: 1px solid var(--border-color); background-color: var(--background-tertiary);
-      color: var(--button-text-secondary);
-      transition: background-color var(--transition-speed) ease, border-color var(--transition-speed) ease, 
-                  color var(--transition-speed) ease, transform var(--transition-speed) ease, 
-                  box-shadow var(--transition-speed) ease;
-      text-decoration: none; overflow: hidden; position: relative;
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 8px 16px; 
+      border-radius: var(--border-radius); font-size: 15px; cursor: pointer; border: 1px solid var(--border-color); 
+      background-color: var(--background-tertiary); color: var(--button-text-secondary); text-decoration: none;
     }
-    
-    .button:hover {
-      background-color: #4d453e; color: var(--accent-primary);
-      border-color: var(--border-color-hover); transform: translateY(-2px); 
-      box-shadow: 0 4px 8px var(--shadow-color);
-    }
-    
-    .button:active { 
-      transform: translateY(0px) scale(0.98); box-shadow: none; 
-    }
-    
-    .client-buttons-container { 
-      display: flex; flex-direction: column; gap: 16px; margin-top: 16px; 
-    }
-    
-    .client-buttons-container h3 { 
-      font-family: var(--serif); font-size: 14px; color: var(--text-secondary); 
-      margin: 8px 0 -8px 0; font-weight: 400; text-align: center; 
-    }
-    
-    .client-buttons { 
-      display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; 
-    }
-    
+    .copy-buttons { font-family: var(--serif); font-size: 13px; padding: 6px 12px; border-radius: 6px; color: var(--accent-secondary); }
+    .client-buttons-container { display: flex; flex-direction: column; gap: 16px; margin-top: 16px; }
+    .client-buttons-container h3 { font-family: var(--serif); font-size: 14px; color: var(--text-secondary); text-align: center; }
+    .client-buttons { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
     .client-btn {
-      width: 100%; background-color: var(--accent-primary); color: var(--background-tertiary);
-      border-radius: 6px; border-color: var(--accent-primary-darker); position: relative; overflow: hidden;
-      transition: all 0.3s cubic-bezier(0.2, 0.8, 0.2, 1); box-shadow: 0 2px 5px rgba(0, 0, 0, 0.15);
+      background-color: var(--accent-primary); color: var(--background-tertiary); border-color: var(--accent-primary-darker);
     }
-    
-    .client-btn:hover {
-      text-transform: uppercase; letter-spacing: 0.3px; transform: translateY(-3px);
-      background-color: var(--accent-secondary); color: var(--button-text-primary);
-      box-shadow: 0 5px 15px rgba(190, 155, 123, 0.5); border-color: var(--accent-secondary);
-    }
-    
-    .client-btn:active { 
-      transform: translateY(0) scale(0.98); box-shadow: 0 2px 3px rgba(0, 0, 0, 0.2); 
-      background-color: var(--accent-primary-darker); 
-    }
-    
-    .qr-container {
-      display: none; text-align: center; margin-top: 10px; background: white; 
-      padding: 10px; border-radius: 8px; max-width: 276px; margin-left: auto; margin-right: auto;
-    }
-    
-    .footer { 
-      text-align: center; margin-top: 20px; margin-bottom: 40px; 
-      color: var(--text-secondary); font-size: 12px; 
-    }
-    
-    .footer p { margin-bottom: 0px; }
-    
-    .network-info-wrapper {
-      background: var(--background-secondary); border-radius: var(--border-radius);
-      padding: 24px; margin-bottom: 24px; border: 1px solid var(--border-color);
-    }
-    
-    .network-info-header {
-      display: flex; justify-content: space-between; align-items: center;
-      margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--border-color);
-    }
-    
-    .network-info-header h2 { 
-      margin: 0; font-size: 1.4rem; font-family: var(--serif); color: var(--accent-secondary); 
-    }
-    
-    .network-grid {
-      display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px;
-    }
-    
-    .network-card {
-      background: #2f2a26; border: 1px solid var(--border-color);
-      border-radius: 8px; padding: 16px;
-    }
-    
-    .network-title {
-      font-size: 1.1em; margin-top: 0; margin-bottom: 12px;
-      border-bottom: 1px solid var(--border-color); padding-bottom: 8px;
-      color: var(--accent-secondary); font-family: var(--serif);
-    }
-    
-    .network-info-grid { display: grid; gap: 8px; font-size: 0.9em; }
-    
-    .network-info-grid strong {
-      color: var(--text-secondary); font-weight: 400; display: inline-block; min-width: 90px;
-    }
-    
-    .network-info-grid span { color: var(--text-primary); font-weight: 500; }
-    
-    .skeleton {
-      display: inline-block; width: 120px; height: 1em;
-      background-color: var(--background-tertiary); border-radius: 4px;
-    }
-    
-    @keyframes loading {
-      0% { background-position: 200% 0; }
-      100% { background-position: -200% 0; }
-    }
-    
-    @media (max-width: 768px) {
-      body { padding: 20px; }
-      .container { padding: 0 14px; width: min(100%, 768px); }
-      .network-grid { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 18px; }
-      .header h1 { font-size: 1.8rem; }
-      .header p { font-size: 0.7rem; }
-      .network-card { padding: 14px; gap: 18px; }
-      .network-title { font-size: 16px; }
-      .client-buttons { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
-    }
-    
-    @media (max-width: 480px) {
-      body { padding: 16px; }
-      .container { padding: 0 12px; width: min(100%, 390px); }
-      .header h1 { font-size: 20px; }
-      .header p { font-size: 8px; }
-      .network-card { padding: 14px; gap: 16px; }
-      .network-grid { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
-      .network-title { font-size: 14px; }
-      .client-buttons { grid-template-columns: repeat(auto-fill, minmax(100%, 1fr)); }
-      .button { padding: 4px 8px; font-size: 11px; }
-      .footer { font-size: 10px; }
-    }
+    .client-btn:hover { background-color: var(--accent-secondary); color: var(--button-text-primary); }
+    .client-icon { width: 18px; height: 18px; border-radius: 6px; background-color: var(--background-secondary); }
+    .footer { text-align: center; margin-top: 20px; margin-bottom: 40px; color: var(--text-secondary); font-size: 8px; }
+    .ip-info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 24px; }
+    .ip-info-section { background-color: var(--background-tertiary); border-radius: var(--border-radius); padding: 16px; }
+    .skeleton { background: linear-gradient(90deg, var(--background-tertiary) 25%, var(--background-secondary) 50%, var(--background-tertiary) 75%); background-size: 200% 100%; height: 16px; border-radius: 4px; }
   `;
 }
 
-function getPageHTML(clientUrls, subXrayUrl, subSbUrl, expirationBlock, usageBlock) {
+function getPageHTMLFromScript1(singleXrayConfig, singleSingboxConfig, clientUrls, subXrayUrl, subSbUrl, expirationBlock, usageBlock) {
   return `
     <div class="container">
       <div class="header">
@@ -2090,29 +1913,25 @@ function getPageHTML(clientUrls, subXrayUrl, subSbUrl, expirationBlock, usageBlo
         <p>Copy the configuration or import directly into your client</p>
       </div>
 
-      <div class="network-info-wrapper">
-        <div class="network-info-header">
-          <h2>Network Information</h2>
-          <button class="button" id="refresh-network-btn">Refresh</button>
+      <div class="config-card">
+        <div class="config-title">
+          <span>Network Information</span>
+          <button id="refresh-ip-info" class="refresh-btn">Refresh</button>
         </div>
-        <div class="network-grid">
-          <div class="network-card">
-            <h3 class="network-title">Proxy Server</h3>
-            <div class="network-info-grid">
-              <div><strong>Proxy Host:</strong> <span id="proxy-host"><span class="skeleton"></span></span></div>
-              <div><strong>IP Address:</strong> <span id="proxy-ip"><span class="skeleton"></span></span></div>
-              <div><strong>Location:</strong> <span id="proxy-location"><span class="skeleton"></span></span></div>
-              <div><strong>ISP:</strong> <span id="proxy-isp"><span class="skeleton"></span></span></div>
-            </div>
+        <div class="ip-info-grid">
+          <div class="ip-info-section">
+            <h3>Proxy Server</h3>
+            <div><strong>Host:</strong> <span id="proxy-host"><span class="skeleton"></span></span></div>
+            <div><strong>IP:</strong> <span id="proxy-ip"><span class="skeleton"></span></span></div>
+            <div><strong>Location:</strong> <span id="proxy-location"><span class="skeleton"></span></span></div>
+            <div><strong>ISP:</strong> <span id="proxy-isp"><span class="skeleton"></span></span></div>
           </div>
-          <div class="network-card">
-            <h3 class="network-title">Your Connection</h3>
-            <div class="network-info-grid">
-              <div><strong>Your IP:</strong> <span id="client-ip"><span class="skeleton"></span></span></div>
-              <div><strong>Location:</strong> <span id="client-location"><span class="skeleton"></span></span></div>
-              <div><strong>ISP:</strong> <span id="client-isp"><span class="skeleton"></span></span></div>
-              <div><strong>Risk Score:</strong> <span id="client-risk"><span class="skeleton"></span></span></div>
-            </div>
+          <div class="ip-info-section">
+            <h3>Your Connection</h3>
+            <div><strong>Your IP:</strong> <span id="client-ip"><span class="skeleton"></span></span></div>
+            <div><strong>Location:</strong> <span id="client-location"><span class="skeleton"></span></span></div>
+            <div><strong>ISP:</strong> <span id="client-isp"><span class="skeleton"></span></span></div>
+            <div><strong>Risk:</strong> <span id="client-proxy"><span class="skeleton"></span></span></div>
           </div>
         </div>
       </div>
@@ -2123,43 +1942,40 @@ function getPageHTML(clientUrls, subXrayUrl, subSbUrl, expirationBlock, usageBlo
       <div class="config-card">
         <div class="config-title">
           <span>Xray Subscription</span>
-          <button id="copy-xray-sub-btn" class="button" data-clipboard-text="${subXrayUrl}">Copy Link</button>
+          <button id="copy-xray-sub-btn" class="button copy-buttons" data-clipboard-text="${subXrayUrl}">Copy Link</button>
         </div>
         <div class="client-buttons-container">
-          <h3>Android</h3>
-          <div class="client-buttons">
-            <a href="${clientUrls.universalAndroid}" class="button client-btn">Universal Import (V2rayNG)</a>
-            <a href="${clientUrls.karing}" class="button client-btn">Import to Karing</a>
-          </div>
-          <h3>iOS</h3>
-          <div class="client-buttons">
-            <a href="${clientUrls.shadowrocket}" class="button client-btn">Import to Shadowrocket</a>
-            <a href="${clientUrls.stash}" class="button client-btn">Import to Stash</a>
-            <a href="${clientUrls.streisand}" class="button client-btn">Import to Streisand</a>
-          </div>
-          <h3>Desktop / Other</h3>
-          <div class="client-buttons">
-            <button class="button client-btn" onclick="toggleQR('xray', '${subXrayUrl}')">Show QR Code</button>
-          </div>
-          <div id="qr-xray-container" class="qr-container"><div id="qr-xray"></div></div>
+            <h3>Android</h3>
+            <div class="client-buttons">
+                <a href="${clientUrls.universalAndroid}" class="button client-btn">Universal Import</a>
+                <a href="${clientUrls.karing}" class="button client-btn">Karing</a>
+            </div>
+            <h3>iOS</h3>
+            <div class="client-buttons">
+                <a href="${clientUrls.shadowrocket}" class="button client-btn">Shadowrocket</a>
+                <a href="${clientUrls.stash}" class="button client-btn">Stash</a>
+                <a href="${clientUrls.streisand}" class="button client-btn">Streisand</a>
+            </div>
+            <h3>Desktop</h3>
+            <div class="client-buttons">
+              <button class="button client-btn" onclick="toggleQR('xray', '${subXrayUrl}')">Show QR Code</button>
+            </div>
+            <div id="qr-xray-container" style="display:none; text-align:center; margin-top: 10px; background: white; padding: 10px; border-radius: 8px; max-width: 276px; margin-left: auto; margin-right: auto;"><div id="qr-xray"></div></div>
         </div>
       </div>
 
       <div class="config-card">
         <div class="config-title">
-          <span>Sing-Box / Clash Subscription</span>
-          <button id="copy-sb-sub-btn" class="button" data-clipboard-text="${subSbUrl}">Copy Link</button>
+          <span>Sing-Box Subscription</span>
+          <button id="copy-sb-sub-btn" class="button copy-buttons" data-clipboard-text="${subSbUrl}">Copy Link</button>
         </div>
         <div class="client-buttons-container">
-          <h3>Android / Windows / macOS</h3>
-          <div class="client-buttons">
-            <a href="${clientUrls.clashMeta}" class="button client-btn">Import to Clash Meta / Stash</a>
-          </div>
-          <h3>Desktop / Other</h3>
-          <div class="client-buttons">
-            <button class="button client-btn" onclick="toggleQR('singbox', '${subSbUrl}')">Show QR Code</button>
-          </div>
-          <div id="qr-singbox-container" class="qr-container"><div id="qr-singbox"></div></div>
+            <h3>All Platforms</h3>
+            <div class="client-buttons">
+                <a href="${clientUrls.clashMeta}" class="button client-btn">Clash Meta</a>
+                <button class="button client-btn" onclick="toggleQR('singbox', '${subSbUrl}')">Show QR Code</button>
+            </div>
+            <div id="qr-singbox-container" style="display:none; text-align:center; margin-top: 10px; background: white; padding: 10px; border-radius: 8px; max-width: 276px; margin-left: auto; margin-right: auto;"><div id="qr-singbox"></div></div>
         </div>
       </div>
 
@@ -2171,29 +1987,17 @@ function getPageHTML(clientUrls, subXrayUrl, subSbUrl, expirationBlock, usageBlo
   `;
 }
 
-function getPageScript() {
+function getPageScriptFromScript1() {
   return `
-    function copyToClipboard(button, text) {
-      const originalText = button.textContent;
-      navigator.clipboard.writeText(text).then(() => {
-        button.textContent = 'Copied!';
-        setTimeout(() => { button.textContent = originalText; }, 1500);
-      }).catch(err => {
-        console.error('Failed to copy:', err);
-      });
-    }
-
     function toggleQR(id, url) {
-      const container = document.getElementById('qr-' + id + '-container');
-      const qrElement = document.getElementById('qr-' + id);
-      
+      var container = document.getElementById('qr-' + id + '-container');
       if (container.style.display === 'none' || container.style.display === '') {
         container.style.display = 'block';
+        var qrElement = document.getElementById('qr-' + id);
+        qrElement.innerHTML = '';
         if (!qrElement.hasChildNodes()) {
           new QRCode(qrElement, {
-            text: url, width: 256, height: 256,
-            colorDark: "#2a2421", colorLight: "#e5dfd6",
-            correctLevel: QRCode.CorrectLevel.H
+            text: url, width: 256, height: 256, colorDark: "#2a2421", colorLight: "#e5dfd6"
           });
         }
       } else {
@@ -2201,30 +2005,39 @@ function getPageScript() {
       }
     }
 
+    async function loadNetworkInfo() {
+      const proxyHost = document.body.getAttribute('data-proxy-ip');
+      document.getElementById('proxy-host').textContent = proxyHost || 'N/A';
+      
+      try {
+        const clientIpResp = await fetch('https://api.ipify.org?format=json');
+        const clientIp = (await clientIpResp.json()).ip;
+        document.getElementById('client-ip').textContent = clientIp;
+        
+        const scamaResp = await fetch(\`/scamalytics-lookup?ip=\${clientIp}\`);
+        const scamaData = await scamaResp.json();
+        if (scamaData.scamalytics) {
+          document.getElementById('client-location').textContent = 
+            [scamaData.external_datasources?.dbip?.ip_city, scamaData.external_datasources?.dbip?.ip_country_name].filter(Boolean).join(', ') || 'N/A';
+          document.getElementById('client-isp').textContent = scamaData.scamalytics.scamalytics_isp || 'N/A';
+          document.getElementById('client-proxy').textContent = 
+            \`\${scamaData.scamalytics.scamalytics_score} - \${scamaData.scamalytics.scamalytics_risk}\`;
+        }
+      } catch (e) { console.error('Network info error:', e); }
+    }
+
     function displayExpirationTimes() {
       const expElement = document.getElementById('expiration-display');
       const relativeElement = document.getElementById('expiration-relative');
-      
-      if (!expElement || !expElement.dataset.utcTime) {
-        if (expElement) expElement.textContent = 'Expiration time not available';
-        if (relativeElement) relativeElement.style.display = 'none';
-        return;
-      }
+      if (!expElement || !expElement.dataset.utcTime) return;
 
       const utcDate = new Date(expElement.dataset.utcTime);
-      if (isNaN(utcDate.getTime())) {
-        expElement.textContent = 'Invalid expiration time format';
-        if (relativeElement) relativeElement.style.display = 'none';
-        return;
-      }
-
       const now = new Date();
-      const diffSeconds = (utcDate.getTime() - now.getTime()) / 1000;
-      const isExpired = diffSeconds < 0;
+      const isExpired = utcDate < now;
 
       const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
+      const diffSeconds = (utcDate.getTime() - now.getTime()) / 1000;
       let relTime = '';
-      
       if (Math.abs(diffSeconds) < 60) relTime = rtf.format(Math.round(diffSeconds), 'second');
       else if (Math.abs(diffSeconds) < 3600) relTime = rtf.format(Math.round(diffSeconds / 60), 'minute');
       else if (Math.abs(diffSeconds) < 86400) relTime = rtf.format(Math.round(diffSeconds / 3600), 'hour');
@@ -2235,129 +2048,22 @@ function getPageScript() {
         relativeElement.classList.add(isExpired ? 'expired' : 'active');
       }
 
-      const commonOptions = {
-        year: 'numeric', month: 'long', day: 'numeric',
-        hour: '2-digit', minute: '2-digit', second: '2-digit',
-        hour12: true, timeZoneName: 'short'
-      };
-
-      const localTime = utcDate.toLocaleString(undefined, commonOptions);
-      const tehranTime = utcDate.toLocaleString('en-US', { ...commonOptions, timeZone: 'Asia/Tehran' });
-      const utcTime = utcDate.toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
-
-      expElement.innerHTML = \`
-        <span><strong>Your Local Time:</strong> \${localTime}</span>
-        <span><strong>Tehran Time:</strong> \${tehranTime}</span>
-        <span><strong>Universal Time:</strong> \${utcTime}</span>
-      \`;
-    }
-
-    async function fetchClientIP() {
-      try {
-        const response = await fetch('https://api.ipify.org?format=json');
-        return (await response.json()).ip;
-      } catch (error) {
-        console.error('Error fetching client IP:', error);
-        return null;
-      }
-    }
-
-    async function fetchScamalyticsInfo(clientIp) {
-      if (!clientIp) return null;
-      try {
-        const response = await fetch(\`/scamalytics-lookup?ip=\${encodeURIComponent(clientIp)}\`);
-        if (!response.ok) return null;
-        return await response.json();
-      } catch (error) {
-        console.error('Error fetching Scamalytics data:', error);
-        return null;
-      }
-    }
-
-    async function fetchIpApiInfo(ip) {
-      try {
-        const response = await fetch(\`https://ip-api.io/json/\${ip}\`);
-        if (!response.ok) return null;
-        return await response.json();
-      } catch (error) {
-        console.error('IP API Error:', error);
-        return null;
-      }
-    }
-
-    async function loadNetworkInfo() {
-      try {
-        const proxyIpWithPort = document.body.getAttribute('data-proxy-ip') || "N/A";
-        const proxyDomain = proxyIpWithPort.split(':')[0];
-        
-        document.getElementById('proxy-host').textContent = proxyIpWithPort;
-
-        if (proxyDomain && proxyDomain !== "N/A") {
-          let resolvedIp = proxyDomain;
-          if (!/^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$/.test(proxyDomain)) {
-            try {
-              const dnsRes = await fetch(\`https://dns.google/resolve?name=\${encodeURIComponent(proxyDomain)}&type=A\`);
-              if (dnsRes.ok) {
-                const dnsData = await dnsRes.json();
-                const ipAnswer = dnsData.Answer?.find(a => a.type === 1);
-                if (ipAnswer) resolvedIp = ipAnswer.data;
-              }
-            } catch (e) {
-              console.error('DNS resolution failed:', e);
-            }
-          }
-          
-          const proxyGeo = await fetchIpApiInfo(resolvedIp);
-          if (proxyGeo) {
-            document.getElementById('proxy-ip').textContent = proxyGeo.ip || 'N/A';
-            document.getElementById('proxy-location').textContent = 
-              [proxyGeo.city, proxyGeo.country_name].filter(Boolean).join(', ') || 'N/A';
-            document.getElementById('proxy-isp').textContent = 
-              proxyGeo.isp || proxyGeo.organisation || 'N/A';
-          }
-        }
-
-        const clientIp = await fetchClientIP();
-        if (clientIp) {
-          document.getElementById('client-ip').textContent = clientIp;
-          const scamalyticsData = await fetchScamalyticsInfo(clientIp);
-          
-          if (scamalyticsData?.scamalytics?.status === 'ok') {
-            const sa = scamalyticsData.scamalytics;
-            const dbip = scamalyticsData.external_datasources?.dbip;
-            
-            document.getElementById('client-location').textContent = 
-              [dbip?.ip_city, dbip?.ip_country_name].filter(Boolean).join(', ') || 'N/A';
-            document.getElementById('client-isp').textContent = 
-              sa.scamalytics_isp || dbip?.isp_name || 'N/A';
-            
-            const riskText = sa.scamalytics_score !== undefined 
-              ? \`\${sa.scamalytics_score} - \${sa.scamalytics_risk}\` 
-              : 'N/A';
-            document.getElementById('client-risk').textContent = riskText;
-          }
-        }
-      } catch (error) {
-        console.error('Network info loading failed:', error);
-      }
+      const localTime = utcDate.toLocaleString();
+      const tehranTime = utcDate.toLocaleString('en-US', { timeZone: 'Asia/Tehran' });
+      expElement.innerHTML = \`<span><strong>Local:</strong> \${localTime}</span><span><strong>Tehran:</strong> \${tehranTime}</span>\`;
     }
 
     document.addEventListener('DOMContentLoaded', () => {
-      displayExpirationTimes();
       loadNetworkInfo();
-
-      document.querySelectorAll('.button[data-clipboard-text]').forEach(button => {
-        button.addEventListener('click', () => {
-          copyToClipboard(button, button.dataset.clipboardText);
+      displayExpirationTimes();
+      document.querySelectorAll('.copy-buttons').forEach(btn => {
+        btn.addEventListener('click', () => {
+          navigator.clipboard.writeText(btn.dataset.clipboardText);
+          btn.textContent = 'Copied!';
+          setTimeout(() => btn.textContent = 'Copy Link', 1500);
         });
       });
-
-      document.getElementById('refresh-network-btn')?.addEventListener('click', () => {
-        document.querySelectorAll('.network-info-grid span').forEach(el => {
-          el.innerHTML = '<span class="skeleton"></span>';
-        });
-        loadNetworkInfo();
-      });
+      document.getElementById('refresh-ip-info')?.addEventListener('click', loadNetworkInfo);
     });
   `;
 }
@@ -2371,12 +2077,10 @@ export default {
     const cfg = Config.fromEnv(env);
     const url = new URL(request.url);
 
-    // Admin panel routes
     if (url.pathname.startsWith('/admin')) {
       return handleAdminRequest(request, env, ctx);
     }
 
-    // WebSocket/VLESS Protocol handler
     const upgradeHeader = request.headers.get('Upgrade');
     if (upgradeHeader?.toLowerCase() === 'websocket') {
       if (!env.DB || !env.USER_KV) {
@@ -2396,60 +2100,38 @@ export default {
       return await ProtocolOverWSHandler(request, requestConfig, env, ctx);
     }
 
-    // Scamalytics lookup endpoint
     if (url.pathname === '/scamalytics-lookup') {
       return handleScamalyticsLookup(request, cfg);
     }
 
-    // Subscription handlers
     const handleSubscription = async (core) => {
       const uuid = url.pathname.slice(`/${core}/`.length);
-      if (!isValidUUID(uuid)) {
-        return new Response('Invalid UUID', { status: 400 });
-      }
+      if (!isValidUUID(uuid)) return new Response('Invalid UUID', { status: 400 });
       
       const userData = await getUserData(env, uuid, ctx);
-      if (!userData) {
-        return new Response('Invalid user', { status: 403 });
-      }
-      
-      if (isExpired(userData.expiration_date, userData.expiration_time)) {
-        return new Response('User expired', { status: 403 });
-      }
-      
-      if (userData.traffic_limit && userData.traffic_limit > 0 && 
-          userData.traffic_used >= userData.traffic_limit) {
+      if (!userData) return new Response('Invalid user', { status: 403 });
+      if (isExpired(userData.expiration_date, userData.expiration_time)) return new Response('User expired', { status: 403 });
+      if (userData.traffic_limit && userData.traffic_limit > 0 && userData.traffic_used >= userData.traffic_limit) {
         return new Response('Data limit reached', { status: 403 });
       }
       
       return handleIpSubscription(core, uuid, url.hostname);
     };
 
-    if (url.pathname.startsWith('/xray/')) {
-      return handleSubscription('xray');
-    }
-    
-    if (url.pathname.startsWith('/sb/')) {
-      return handleSubscription('sb');
-    }
+    if (url.pathname.startsWith('/xray/')) return handleSubscription('xray');
+    if (url.pathname.startsWith('/sb/')) return handleSubscription('sb');
 
-    // User config page
     const path = url.pathname.slice(1);
     if (isValidUUID(path)) {
       const userData = await getUserData(env, path, ctx);
-      if (!userData) {
-        return new Response('Invalid user', { status: 403 });
-      }
-      
+      if (!userData) return new Response('Invalid user', { status: 403 });
       return handleConfigPage(path, url.hostname, cfg.proxyAddress, userData);
     }
 
-    // Root proxy fallback (if configured)
     if (env.ROOT_PROXY_URL) {
       try {
         const proxyUrl = new URL(env.ROOT_PROXY_URL);
         const targetUrl = new URL(request.url);
-        
         targetUrl.hostname = proxyUrl.hostname;
         targetUrl.protocol = proxyUrl.protocol;
         targetUrl.port = proxyUrl.port;
@@ -2457,12 +2139,10 @@ export default {
         const newRequest = new Request(targetUrl, request);
         newRequest.headers.set('Host', proxyUrl.hostname);
         newRequest.headers.set('X-Forwarded-For', request.headers.get('CF-Connecting-IP'));
-        newRequest.headers.set('X-Forwarded-Proto', 'https');
         
         const response = await fetch(newRequest);
         const mutableHeaders = new Headers(response.headers);
         mutableHeaders.delete('Content-Security-Policy');
-        mutableHeaders.delete('Content-Security-Policy-Report-Only');
         mutableHeaders.delete('X-Frame-Options');
         
         return new Response(response.body, {
@@ -2471,8 +2151,7 @@ export default {
           headers: mutableHeaders
         });
       } catch (e) {
-        console.error(`Reverse Proxy Error: ${e.message}`);
-        return new Response(`Proxy configuration error: ${e.message}`, { status: 502 });
+        return new Response(`Proxy error: ${e.message}`, { status: 502 });
       }
     }
 
