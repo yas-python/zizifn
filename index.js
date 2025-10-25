@@ -1,6 +1,12 @@
 /**
  * Ultimate VLESS Proxy Worker - Complete Production Edition
- * * Features:
+ *
+ * *** FIX v2 (Connection Logic): ***
+ * - Modified HandleTCPOutBound to connect directly to the target host (addressRemote) first.
+ * - Using PROXYIP only as a fallback retry mechanism, identical to the "working" script.
+ * - This resolves SSL/TLS `handshake failure` and `ERR_SSL_VERSION_OR_CIPHER_MISMATCH` errors.
+ *
+ * Features:
  * - Advanced WebSocket handling with accurate traffic counting
  * - Admin panel with user management (expiration + traffic limits)
  * - Beautiful user config page with network info
@@ -9,7 +15,8 @@
  * - D1 Database + KV Cache with optimized performance
  * - Real-time statistics dashboard
  * - Bulk operations support
- * * Setup Requirements:
+ *
+ * Setup Requirements:
  * 1. D1 Database (bind as DB)
  * 2. KV Namespace (bind as USER_KV)
  * 3. Run SQL in D1 console:
@@ -930,13 +937,14 @@ async function handleAdminRequest(request, env, ctx) {
         }
 
         await env.DB.prepare("INSERT INTO users (uuid, expiration_date, expiration_time, notes, traffic_limit, traffic_used) VALUES (?, ?, ?, ?, ?, 0)")
-          .bind(uuid, expDate, expTime, notes || null, traffic_limit).run(); // Use traffic_limit (which can be null)
+          .bind(uuid, expDate, expTime, notes || null, traffic_limit).run();
         
         ctx.waitUntil(env.USER_KV.put(`user:${uuid}`, JSON.stringify({ 
           uuid,
           expiration_date: expDate, 
           expiration_time: expTime, 
-          traffic_limit: traffic_limit, // Store null if it is null
+          notes: notes || null,
+          traffic_limit: traffic_limit, 
           traffic_used: 0 
         })));
 
@@ -979,7 +987,7 @@ async function handleAdminRequest(request, env, ctx) {
         }
 
         let query = "UPDATE users SET expiration_date = ?, expiration_time = ?, notes = ?, traffic_limit = ?";
-        let binds = [expDate, expTime, notes || null, traffic_limit]; // Use traffic_limit (can be null)
+        let binds = [expDate, expTime, notes || null, traffic_limit];
         
         if (reset_traffic) {
           query += ", traffic_used = 0";
@@ -1044,7 +1052,7 @@ async function handleAdminRequest(request, env, ctx) {
 }
 
 // ============================================================================
-// VLESS PROTOCOL HANDLERS - CRITICAL FIX FOR CONNECTION ISSUES
+// VLESS PROTOCOL HANDLERS
 // ============================================================================
 
 async function ProtocolOverWSHandler(request, config, env, ctx) {
@@ -1060,16 +1068,13 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
 
   const log = (info, event) => console.log(`[${address}:${portWithRandomLog}] ${info}`, event || '');
 
-  // CRITICAL FIX: Create a deferred update mechanism that doesn't block the connection
   const deferredUsageUpdate = () => {
     if (sessionUsage > 0 && userUUID) {
       const usageToUpdate = sessionUsage;
       const uuidToUpdate = userUUID;
       
-      // Reset counters immediately
       sessionUsage = 0;
       
-      // Schedule the update without blocking
       ctx.waitUntil(
         updateUsage(env, uuidToUpdate, usageToUpdate, ctx)
           .catch(err => console.error(`Deferred usage update failed for ${uuidToUpdate}:`, err))
@@ -1077,10 +1082,8 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
     }
   };
 
-  // Schedule periodic updates every 10 seconds during active connection
   const updateInterval = setInterval(deferredUsageUpdate, 10000);
 
-  // Final cleanup handler
   const finalCleanup = () => {
     clearInterval(updateInterval);
     deferredUsageUpdate(); // Final update
@@ -1093,12 +1096,10 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
   const readableWebSocketStream = MakeReadableWebSocketStream(webSocket, earlyDataHeader, log);
   let remoteSocketWrapper = { value: null };
 
-  // CRITICAL FIX: Simplified traffic counting that doesn't interfere with data flow
   readableWebSocketStream
     .pipeTo(
       new WritableStream({
         async write(chunk, controller) {
-          // Count download traffic (from client)
           sessionUsage += chunk.byteLength;
 
           if (udpStreamWriter) {
@@ -1136,13 +1137,11 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
 
           userUUID = user.uuid;
 
-          // Check expiration
           if (isExpired(user.expiration_date, user.expiration_time)) {
             controller.error(new Error('User expired'));
             return;
           }
 
-          // Check traffic limit
           if (user.traffic_limit && user.traffic_limit > 0) {
             const totalUsage = (user.traffic_used || 0) + sessionUsage;
             if (totalUsage >= user.traffic_limit) {
@@ -1169,6 +1168,11 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
             return;
           }
 
+          // *****************************************************************
+          // *** BEGIN CRITICAL FIX ***
+          // The HandleTCPOutBound function is replaced with the logic
+          // that prioritizes a direct connection.
+          // *****************************************************************
           HandleTCPOutBound(
             remoteSocketWrapper,
             addressType,
@@ -1179,8 +1183,11 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
             vlessResponseHeader,
             log,
             config,
-            (bytes) => { sessionUsage += bytes; } // Simple callback for upload traffic counting
+            (bytes) => { sessionUsage += bytes; }
           );
+          // *****************************************************************
+          // *** END CRITICAL FIX ***
+          // *****************************************************************
         },
         close() {
           log('readableWebSocketStream closed');
@@ -1243,7 +1250,7 @@ async function ProcessProtocolHeader(protocolBuffer, env, ctx) {
     return { hasError: true, message: 'invalid data length (port)' };
   }
   
-  const portRemote = dataView.getUint16(portIndex, false);
+  const portRemote = dataView.getUint16(portIndex, false); // false = Big Endian (Network Order)
 
   const addressTypeIndex = portIndex + 2;
   if (protocolBuffer.byteLength < addressTypeIndex + 1) {
@@ -1283,7 +1290,7 @@ async function ProcessProtocolHeader(protocolBuffer, env, ctx) {
         return { hasError: true, message: 'invalid data length (ipv6)' };
       }
       addressValue = Array.from({ length: 8 }, (_, i) => 
-        dataView.getUint16(addressValueIndex + i * 2, false).toString(16)
+        dataView.getUint16(addressValueIndex + i * 2, false).toString(16) // false = Big Endian
       ).join(':');
       break;
       
@@ -1308,6 +1315,11 @@ async function ProcessProtocolHeader(protocolBuffer, env, ctx) {
   };
 }
 
+// ============================================================================
+// *** REPLACEMENT HandleTCPOutBound FUNCTION ***
+// This function is now fixed. It attempts a direct connection first
+// and only uses PROXYIP as a fallback.
+// ============================================================================
 async function HandleTCPOutBound(
   remoteSocket,
   addressType,
@@ -1320,12 +1332,15 @@ async function HandleTCPOutBound(
   config,
   trafficCallback
 ) {
+  // This connectAndWrite function is from your main script and is correct.
   async function connectAndWrite(address, port, useSocks = false) {
     let tcpSocket;
     
     if (useSocks || config.socks5Relay) {
+      log(`Connecting to ${address}:${port} via SOCKS5...`);
       tcpSocket = await socks5Connect(addressType, address, port, log, config.parsedSocks5Address);
     } else {
+      log(`Connecting directly to ${address}:${port}...`);
       tcpSocket = connect({ hostname: address, port: port });
     }
     
@@ -1339,18 +1354,20 @@ async function HandleTCPOutBound(
     return tcpSocket;
   }
 
-  const connectHost = config.proxyIP || addressRemote;
-  const connectPort = config.proxyIP ? (config.proxyPort || 443) : portRemote;
-
-  if (config.proxyIP) {
-    log(`Using PROXYIP ${connectHost}:${connectPort} for target ${addressRemote}:${portRemote}`);
-  }
-
+  // This retry logic is based on the "working" script.
+  // It will be called if the initial direct connection fails.
   async function retry() {
     try {
+      // The retry *can* use the PROXYIP as a fallback.
+      const connectHost = config.proxyIP || addressRemote;
+      const connectPort = config.proxyIP ? (config.proxyPort || 443) : portRemote;
+      
+      log(`Retrying connection, using ${config.proxyIP ? 'PROXYIP' : 'direct fallback'}: ${connectHost}:${connectPort}`);
+
+      // Note: SOCKS5 retry should still go to addressRemote, not the PROXYIP.
       const tcpSocket = config.enableSocks
-        ? await connectAndWrite(addressRemote, portRemote, true)
-        : await connectAndWrite(connectHost, connectPort, false);
+        ? await connectAndWrite(addressRemote, portRemote, true) 
+        : await connectAndWrite(connectHost, connectPort, false); // Fallback uses PROXYIP
 
       tcpSocket.closed
         .catch(error => console.log('retry tcpSocket closed error', error))
@@ -1364,18 +1381,29 @@ async function HandleTCPOutBound(
   }
 
   try {
-    const tcpSocket = await connectAndWrite(connectHost, connectPort, config.enableSocks);
+    // --- THIS IS THE FIX ---
+    // The initial connection MUST go to addressRemote, portRemote.
+    // config.enableSocks will be passed to connectAndWrite to handle SOCKS5.
+    log(`Attempting initial connection to ${addressRemote}:${portRemote} ${config.enableSocks ? 'via SOCKS5' : 'directly'}`);
+    
+    const tcpSocket = await connectAndWrite(addressRemote, portRemote, config.enableSocks);
     
     tcpSocket.closed
       .catch(error => console.log('tcpSocket closed error', error))
       .finally(() => safeCloseWebSocket(webSocket));
       
+    // Pass the `retry` function to be called if this connection fails
     RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, retry, log, trafficCallback);
   } catch (e) {
-    log(`Failed to connect to ${connectHost}:${connectPort}: ${e.message}`);
-    safeCloseWebSocket(webSocket);
+    log(`Initial connection to ${addressRemote}:${portRemote} failed: ${e.message}. Calling retry...`);
+    // If the first attempt fails, call retry()
+    await retry();
   }
 }
+// ============================================================================
+// *** END OF REPLACEMENT FUNCTION ***
+// ============================================================================
+
 
 function MakeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
   return new ReadableStream({
@@ -1422,7 +1450,6 @@ async function RemoteSocketToWS(remoteSocket, webSocket, protocolResponseHeader,
           
           hasIncomingData = true;
           
-          // Count upload traffic (to client)
           if (trafficCallback) {
             trafficCallback(chunk.byteLength);
           }
@@ -1523,7 +1550,6 @@ async function createDnsPipeline(webSocket, vlessResponseHeader, log, trafficCal
 
               const responseChunk = await blob.arrayBuffer();
               
-              // Count DNS response traffic
               if (trafficCallback) {
                 trafficCallback(responseChunk.byteLength);
               }
@@ -1747,7 +1773,7 @@ function generateBeautifulConfigPage(userID, hostName, proxyAddress, expDate = '
 
   let usageBlock = '';
   if (trafficLimit !== null && trafficLimit > 0) {
-    const usedPct = ((trafficUsed / trafficLimit) * 100).toFixed(2);
+    const usedPct = Math.min(((trafficUsed / trafficLimit) * 100), 100).toFixed(2);
     const progressColor = usedPct > 90 ? 'linear-gradient(90deg, #e05d44, #ef4444)' : 
                          usedPct > 70 ? 'linear-gradient(90deg, #e0bc44, #f59e0b)' : 
                          'linear-gradient(90deg, #70b570, #22c55e)';
