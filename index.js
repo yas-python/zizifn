@@ -1,21 +1,8 @@
 /**
  * Ultimate VLESS Proxy Worker - Complete Production Edition
- *
- * *** FIX v2 (Connection Logic): ***
- * - Modified HandleTCPOutBound to connect directly to the target host (addressRemote) first.
- * - Using PROXYIP only as a fallback retry mechanism, identical to the "working" script.
- * - This resolves SSL/TLS `handshake failure` and `ERR_SSL_VERSION_OR_CIPHER_MISMATCH` errors.
- *
- * Features:
- * - Advanced WebSocket handling with accurate traffic counting
- * - Admin panel with user management (expiration + traffic limits)
- * - Beautiful user config page with network info
- * - Full PROXYIP and SOCKS5 support
- * - Multi-timezone support (Local, Tehran, UTC)
- * - D1 Database + KV Cache with optimized performance
- * - Real-time statistics dashboard
- * - Bulk operations support
- *
+ * *** FIX v3 (Connection Logic): ***
+ * - HandleTCPOutBound  PROXYIP
+ * - ERR_CONNECTION_CLOSED SSL/TLS
  * Setup Requirements:
  * 1. D1 Database (bind as DB)
  * 2. KV Namespace (bind as USER_KV)
@@ -1170,8 +1157,7 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
 
           // *****************************************************************
           // *** BEGIN CRITICAL FIX ***
-          // The HandleTCPOutBound function is replaced with the logic
-          // that prioritizes a direct connection.
+          // HandleTCPOutBound فراخوانی می‌شود
           // *****************************************************************
           HandleTCPOutBound(
             remoteSocketWrapper,
@@ -1316,9 +1302,8 @@ async function ProcessProtocolHeader(protocolBuffer, env, ctx) {
 }
 
 // ============================================================================
-// *** REPLACEMENT HandleTCPOutBound FUNCTION ***
-// This function is now fixed. It attempts a direct connection first
-// and only uses PROXYIP as a fallback.
+// *** REPLACEMENT HandleTCPOutBound FUNCTION (FIXED) ***
+// این تابع اصلاح شده است تا همیشه از PROXYIP (مانند اسکریپت اول) استفاده کند.
 // ============================================================================
 async function HandleTCPOutBound(
   remoteSocket,
@@ -1332,7 +1317,7 @@ async function HandleTCPOutBound(
   config,
   trafficCallback
 ) {
-  // This connectAndWrite function is from your main script and is correct.
+  // این تابع کمکی برای اتصال است
   async function connectAndWrite(address, port, useSocks = false) {
     let tcpSocket;
     
@@ -1340,7 +1325,7 @@ async function HandleTCPOutBound(
       log(`Connecting to ${address}:${port} via SOCKS5...`);
       tcpSocket = await socks5Connect(addressType, address, port, log, config.parsedSocks5Address);
     } else {
-      log(`Connecting directly to ${address}:${port}...`);
+      log(`Connecting to ${address}:${port}...`);
       tcpSocket = connect({ hostname: address, port: port });
     }
     
@@ -1354,50 +1339,38 @@ async function HandleTCPOutBound(
     return tcpSocket;
   }
 
-  // This retry logic is based on the "working" script.
-  // It will be called if the initial direct connection fails.
-  async function retry() {
-    try {
-      // The retry *can* use the PROXYIP as a fallback.
+  try {
+    // --- START MODIFICATION (شروع اصلاح) ---
+    // منطق قبلی (اتصال مستقیم، سپس تلاش مجدد با PROXYIP) باعث خطا می‌شد.
+    // منطق جدید (مشابه اسکریپت اول شما) همیشه از PROXYIP (اگر SOCKS5 فعال نباشد) استفاده می‌کند.
+
+    let tcpSocket;
+
+    if (config.enableSocks) {
+      // اگر SOCKS5 فعال است، باید مستقیماً به مقصد (از طریق پراکسی SOCKS5) وصل شود
+      log(`Attempting initial connection to ${addressRemote}:${portRemote} via SOCKS5...`);
+      tcpSocket = await connectAndWrite(addressRemote, portRemote, true);
+    } else {
+      // اگر SOCKS5 فعال نیست، از PROXYIP استفاده کن (مانند اسکریپت اول)
       const connectHost = config.proxyIP || addressRemote;
       const connectPort = config.proxyIP ? (config.proxyPort || 443) : portRemote;
       
-      log(`Retrying connection, using ${config.proxyIP ? 'PROXYIP' : 'direct fallback'}: ${connectHost}:${connectPort}`);
-
-      // Note: SOCKS5 retry should still go to addressRemote, not the PROXYIP.
-      const tcpSocket = config.enableSocks
-        ? await connectAndWrite(addressRemote, portRemote, true) 
-        : await connectAndWrite(connectHost, connectPort, false); // Fallback uses PROXYIP
-
-      tcpSocket.closed
-        .catch(error => console.log('retry tcpSocket closed error', error))
-        .finally(() => safeCloseWebSocket(webSocket));
-        
-      RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, null, log, trafficCallback);
-    } catch (e) {
-      log(`Retry failed: ${e.message}`);
-      safeCloseWebSocket(webSocket);
+      log(`Attempting connection to ${addressRemote}:${portRemote} via ${config.proxyIP ? 'PROXYIP' : 'direct'}: ${connectHost}:${connectPort}`);
+      tcpSocket = await connectAndWrite(connectHost, connectPort, false);
     }
-  }
+    // --- END MODIFICATION (پایان اصلاح) ---
 
-  try {
-    // --- THIS IS THE FIX ---
-    // The initial connection MUST go to addressRemote, portRemote.
-    // config.enableSocks will be passed to connectAndWrite to handle SOCKS5.
-    log(`Attempting initial connection to ${addressRemote}:${portRemote} ${config.enableSocks ? 'via SOCKS5' : 'directly'}`);
-    
-    const tcpSocket = await connectAndWrite(addressRemote, portRemote, config.enableSocks);
-    
     tcpSocket.closed
       .catch(error => console.log('tcpSocket closed error', error))
       .finally(() => safeCloseWebSocket(webSocket));
       
-    // Pass the `retry` function to be called if this connection fails
-    RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, retry, log, trafficCallback);
+    // دیگر نیازی به تابع 'retry' نیست چون از ابتدا بهترین روش را انتخاب کردیم
+    RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, null, log, trafficCallback);
+    
   } catch (e) {
-    log(`Initial connection to ${addressRemote}:${portRemote} failed: ${e.message}. Calling retry...`);
-    // If the first attempt fails, call retry()
-    await retry();
+    // اگر اتصال اولیه (که اکنون شامل PROXYIP است) شکست بخورد، سوکت را می‌بندیم
+    log(`Initial connection failed: ${e.message}. Closing socket.`);
+    safeCloseWebSocket(webSocket);
   }
 }
 // ============================================================================
@@ -1474,6 +1447,7 @@ async function RemoteSocketToWS(remoteSocket, webSocket, protocolResponseHeader,
     safeCloseWebSocket(webSocket);
   }
   
+  // اگر 'retry' null باشد، این کد اجرا نمی‌شود، که اکنون همینطور است
   if (!hasIncomingData && retry) {
     log('No incoming data, retrying');
     retry();
