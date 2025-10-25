@@ -1,8 +1,7 @@
 /**
  * Ultimate VLESS Proxy Worker - Complete Production Edition
- * *** FIX v3 (Connection Logic): ***
- * - HandleTCPOutBound  PROXYIP
- * - ERR_CONNECTION_CLOSED SSL/TLS
+ *
+ * *** FIX v4 (Connection Logic Corrected):
  * Setup Requirements:
  * 1. D1 Database (bind as DB)
  * 2. KV Namespace (bind as USER_KV)
@@ -1157,7 +1156,7 @@ async function ProtocolOverWSHandler(request, config, env, ctx) {
 
           // *****************************************************************
           // *** BEGIN CRITICAL FIX ***
-          // HandleTCPOutBound فراخوانی می‌شود
+          // HandleTCPOutBound با منطق صحیح (تلاش-مستقیم، سپس تلاش- مجدد) فراخوانی می‌شود
           // *****************************************************************
           HandleTCPOutBound(
             remoteSocketWrapper,
@@ -1302,8 +1301,9 @@ async function ProcessProtocolHeader(protocolBuffer, env, ctx) {
 }
 
 // ============================================================================
-// *** REPLACEMENT HandleTCPOutBound FUNCTION (FIXED) ***
-// این تابع اصلاح شده است تا همیشه از PROXYIP (مانند اسکریپت اول) استفاده کند.
+// *** CORRECTED HandleTCPOutBound FUNCTION (FIXED) ***
+// این تابع اکنون به درستی ابتدا اتصال مستقیم را امتحان می‌کند
+// و فقط در صورت شکست از PROXYIP استفاده می‌کند (دقیقاً مانند اسکریپت اول).
 // ============================================================================
 async function HandleTCPOutBound(
   remoteSocket,
@@ -1317,7 +1317,7 @@ async function HandleTCPOutBound(
   config,
   trafficCallback
 ) {
-  // این تابع کمکی برای اتصال است
+  // تابع کمکی برای اتصال
   async function connectAndWrite(address, port, useSocks = false) {
     let tcpSocket;
     
@@ -1325,7 +1325,7 @@ async function HandleTCPOutBound(
       log(`Connecting to ${address}:${port} via SOCKS5...`);
       tcpSocket = await socks5Connect(addressType, address, port, log, config.parsedSocks5Address);
     } else {
-      log(`Connecting to ${address}:${port}...`);
+      log(`Connecting directly to ${address}:${port}...`);
       tcpSocket = connect({ hostname: address, port: port });
     }
     
@@ -1339,42 +1339,53 @@ async function HandleTCPOutBound(
     return tcpSocket;
   }
 
-  try {
-    // --- START MODIFICATION (شروع اصلاح) ---
-    // منطق قبلی (اتصال مستقیم، سپس تلاش مجدد با PROXYIP) باعث خطا می‌شد.
-    // منطق جدید (مشابه اسکریپت اول شما) همیشه از PROXYIP (اگر SOCKS5 فعال نباشد) استفاده می‌کند.
-
-    let tcpSocket;
-
-    if (config.enableSocks) {
-      // اگر SOCKS5 فعال است، باید مستقیماً به مقصد (از طریق پراکسی SOCKS5) وصل شود
-      log(`Attempting initial connection to ${addressRemote}:${portRemote} via SOCKS5...`);
-      tcpSocket = await connectAndWrite(addressRemote, portRemote, true);
-    } else {
-      // اگر SOCKS5 فعال نیست، از PROXYIP استفاده کن (مانند اسکریپت اول)
+  // تابع تلاش مجدد (Retry)
+  async function retry() {
+    try {
+      // در تلاش مجدد، از PROXYIP (اگر وجود داشته باشد) یا هاست اصلی استفاده کن
       const connectHost = config.proxyIP || addressRemote;
       const connectPort = config.proxyIP ? (config.proxyPort || 443) : portRemote;
       
-      log(`Attempting connection to ${addressRemote}:${portRemote} via ${config.proxyIP ? 'PROXYIP' : 'direct'}: ${connectHost}:${connectPort}`);
-      tcpSocket = await connectAndWrite(connectHost, connectPort, false);
-    }
-    // --- END MODIFICATION (پایان اصلاح) ---
+      log(`Retrying connection, using ${config.proxyIP ? 'PROXYIP' : 'direct fallback'}: ${connectHost}:${connectPort}`);
 
+      // اگر SOCKS5 فعال باشد، تلاش مجدد باید به هاست مقصد اصلی برود
+      const tcpSocket = config.enableSocks
+        ? await connectAndWrite(addressRemote, portRemote, true) 
+        : await connectAndWrite(connectHost, connectPort, false); // در غیر این صورت، از PROXYIP استفاده کن
+
+      tcpSocket.closed
+        .catch(error => console.log('retry tcpSocket closed error', error))
+        .finally(() => safeCloseWebSocket(webSocket));
+        
+      // در تلاش مجدد، دیگر تابع retry را پاس نده (null)
+      RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, null, log, trafficCallback);
+    } catch (e) {
+      log(`Retry failed: ${e.message}`);
+      safeCloseWebSocket(webSocket);
+    }
+  }
+
+  try {
+    // --- منطق اتصال صحیح ---
+    // 1. تلاش اول: اتصال مستقیم به هاست مقصد (addressRemote)
+    log(`Attempting initial connection to ${addressRemote}:${portRemote} ${config.enableSocks ? 'via SOCKS5' : 'directly'}`);
+    
+    const tcpSocket = await connectAndWrite(addressRemote, portRemote, config.enableSocks);
+    
     tcpSocket.closed
       .catch(error => console.log('tcpSocket closed error', error))
       .finally(() => safeCloseWebSocket(webSocket));
       
-    // دیگر نیازی به تابع 'retry' نیست چون از ابتدا بهترین روش را انتخاب کردیم
-    RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, null, log, trafficCallback);
-    
+    // 2. تابع retry را برای اجرا در صورت شکست اتصال، پاس بده
+    RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, retry, log, trafficCallback);
   } catch (e) {
-    // اگر اتصال اولیه (که اکنون شامل PROXYIP است) شکست بخورد، سوکت را می‌بندیم
-    log(`Initial connection failed: ${e.message}. Closing socket.`);
-    safeCloseWebSocket(webSocket);
+    // 3. اگر تلاش اول شکست خورد، تابع retry را فراخوانی کن
+    log(`Initial connection to ${addressRemote}:${portRemote} failed: ${e.message}. Calling retry...`);
+    await retry();
   }
 }
 // ============================================================================
-// *** END OF REPLACEMENT FUNCTION ***
+// *** END OF CORRECTED FUNCTION ***
 // ============================================================================
 
 
@@ -1447,7 +1458,7 @@ async function RemoteSocketToWS(remoteSocket, webSocket, protocolResponseHeader,
     safeCloseWebSocket(webSocket);
   }
   
-  // اگر 'retry' null باشد، این کد اجرا نمی‌شود، که اکنون همینطور است
+  // اگر اتصال اول داده‌ای دریافت نکرد (و تابع retry وجود داشت)، آن را اجرا کن
   if (!hasIncomingData && retry) {
     log('No incoming data, retrying');
     retry();
